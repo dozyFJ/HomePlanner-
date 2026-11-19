@@ -7,38 +7,59 @@ pub const SHEET: Color32 = Color32::from_rgb(252, 254, 255);
 pub const BORDER: Color32 = Color32::from_rgb(207, 224, 237);
 pub const VIEWPORT: [f32; 3] = [0.074, 0.149, 0.220];
 
-pub fn apply(context: &egui::Context) {
-    let mut visuals = Visuals::light();
-    visuals.panel_fill = SURFACE;
-    visuals.window_fill = Color32::WHITE;
-    visuals.window_stroke = Stroke::new(1.0_f32, BORDER);
+pub fn apply(context: &egui::Context, dark: bool) {
+    let mut visuals = if dark {
+        Visuals::dark()
+    } else {
+        Visuals::light()
+    };
+    let (panel, window, stroke, text, accent, rest, hover, active) = if dark {
+        (
+            Color32::from_rgb(16, 28, 42),
+            Color32::from_rgb(27, 45, 61),
+            Color32::from_rgb(51, 79, 101),
+            Color32::from_rgb(234, 246, 253),
+            Color32::from_rgb(117, 209, 255),
+            Color32::from_rgb(34, 57, 76),
+            Color32::from_rgb(42, 70, 93),
+            Color32::from_rgb(46, 88, 116),
+        )
+    } else {
+        (
+            SURFACE,
+            Color32::WHITE,
+            BORDER,
+            INK,
+            ACCENT,
+            SURFACE,
+            Color32::from_rgb(221, 239, 251),
+            Color32::from_rgb(205, 231, 249),
+        )
+    };
+    visuals.panel_fill = panel;
+    visuals.window_fill = window;
+    visuals.window_stroke = Stroke::new(1.0_f32, stroke);
     visuals.window_rounding = Rounding::same(16.0);
     visuals.menu_rounding = Rounding::same(12.0);
-    visuals.hyperlink_color = ACCENT;
-    visuals.selection.bg_fill = Color32::from_rgb(211, 235, 251);
-    visuals.selection.stroke = Stroke::new(1.0_f32, ACCENT);
-    visuals.faint_bg_color = Color32::from_rgb(221, 238, 250);
-    visuals.extreme_bg_color = SHEET;
-    visuals.code_bg_color = SURFACE;
-    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, INK);
-    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    visuals.hyperlink_color = accent;
+    visuals.selection.bg_fill = active;
+    visuals.selection.stroke = Stroke::new(1.0_f32, accent);
+    visuals.faint_bg_color = hover;
+    visuals.extreme_bg_color = if dark { panel } else { SHEET };
+    visuals.code_bg_color = panel;
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, text);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, stroke);
 
     for (widget, fill) in [
-        (&mut visuals.widgets.inactive, SURFACE),
-        (
-            &mut visuals.widgets.hovered,
-            Color32::from_rgb(221, 239, 251),
-        ),
-        (
-            &mut visuals.widgets.active,
-            Color32::from_rgb(205, 231, 249),
-        ),
-        (&mut visuals.widgets.open, Color32::from_rgb(217, 237, 250)),
+        (&mut visuals.widgets.inactive, rest),
+        (&mut visuals.widgets.hovered, hover),
+        (&mut visuals.widgets.active, active),
+        (&mut visuals.widgets.open, hover),
     ] {
         widget.bg_fill = fill;
         widget.weak_bg_fill = fill;
-        widget.bg_stroke = Stroke::new(1.0_f32, BORDER);
-        widget.fg_stroke = Stroke::new(1.5_f32, INK);
+        widget.bg_stroke = Stroke::new(1.0_f32, stroke);
+        widget.fg_stroke = Stroke::new(1.5_f32, text);
         widget.rounding = Rounding::same(9.0);
         widget.expansion = 0.0;
     }
@@ -50,9 +71,12 @@ pub fn apply(context: &egui::Context) {
     });
 }
 
-pub fn toolbar() -> Frame {
+pub fn toolbar(context: &egui::Context) -> Frame {
+    let style = context.style();
+    let fill = style.visuals.window_fill;
+    let border = style.visuals.window_stroke;
     Frame::none()
-        .fill(Color32::WHITE)
-        .stroke(Stroke::new(1.0_f32, BORDER))
-        .inner_margin(Margin::symmetric(10.0, 5.0))
+        .fill(fill)
+        .stroke(border)
+        .inner_margin(Margin::symmetric(8.0, 3.0))
 }

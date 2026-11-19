@@ -134,12 +134,16 @@ impl Default for Modeling {
 }
 
 impl Modeling {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", test))]
     pub fn set_path(&mut self, path: PathBuf) {
         self.path = path;
         if self.path.is_file() {
             self.open();
         }
+    }
+
+    pub fn has_saved_model(&self) -> bool {
+        self.path.is_file() || !self.undo.is_empty()
     }
 
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
@@ -250,7 +254,7 @@ impl Modeling {
             self.drag = None;
         }
         egui::TopBottomPanel::bottom("model_tools")
-            .frame(crate::theme::toolbar())
+            .frame(crate::theme::toolbar(ctx))
             .show(ctx, |ui| {
                 if mobile {
                     ui.spacing_mut().interact_size.y = 31.0;

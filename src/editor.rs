@@ -115,6 +115,10 @@ struct FurnitureDrag {
 
 pub struct Editor {
     pub open_updates: Option<Box<dyn Fn() -> Result<(), String>>>,
+    pub open_projects: Option<Box<dyn Fn() -> Result<(), String>>>,
+    pub close_project: Option<Box<dyn Fn() -> Result<(), String>>>,
+    pub open_new_project: Option<Box<dyn Fn() -> Result<(), String>>>,
+    pub project_title: String,
     pub open_photo: Option<Box<dyn Fn() -> Result<(), String>>>,
     photo_path: Option<PathBuf>,
     photo: Option<Photo>,
@@ -155,6 +159,10 @@ impl Default for Editor {
         Self {
             plan: Plan::default(),
             open_updates: None,
+            open_projects: None,
+            close_project: None,
+            open_new_project: None,
+            project_title: "План дома".into(),
             open_photo: None,
             photo_path: None,
             photo: None,
@@ -192,7 +200,7 @@ impl Default for Editor {
 }
 
 impl Editor {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", test))]
     pub fn for_android(path: PathBuf) -> Self {
         let mut editor = Self {
             path: path.to_string_lossy().into_owned(),
@@ -444,7 +452,7 @@ impl Editor {
             if self.photo.is_some() {
                 ui.checkbox(&mut self.photo_visible, "Подложка");
                 let walls = ui.button("Распознать стены").clicked();
-                let preview = ui.button("Фото → Дом · 3D").clicked();
+                let preview = ui.button("Фото в 3D").clicked();
                 if (walls || preview)
                     && let Some(photo) = &self.photo
                 {
@@ -462,6 +470,40 @@ impl Editor {
                 }
             }
         });
+    }
+
+    pub fn persist_project(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.modeling_open
+            || PathBuf::from(&self.path).is_file()
+            || !self.plan.walls.is_empty()
+            || !self.plan.rooms.is_empty()
+            || !self.plan.furniture.is_empty()
+        {
+            self.save()?;
+        }
+        if self.modeling_open || self.modeling.has_saved_model() {
+            self.modeling.save()?;
+        }
+        Ok(())
+    }
+
+    fn menu_action(&mut self, project_action: ProjectAction) {
+        self.flush_tap();
+        if let Err(error) = self.persist_project() {
+            self.message = format!("Не удалось сохранить проект: {error}");
+            return;
+        }
+        let action = match project_action {
+            ProjectAction::Open => &self.open_projects,
+            ProjectAction::Close => &self.close_project,
+            ProjectAction::New => &self.open_new_project,
+            ProjectAction::Updates => &self.open_updates,
+        };
+        if let Some(open) = action
+            && let Err(error) = open()
+        {
+            self.message = format!("Не удалось открыть экран: {error}");
+        }
     }
 
     pub fn ui(&mut self, ctx: &egui::Context, atlas: &FurnishingAtlas) {
@@ -488,28 +530,87 @@ impl Editor {
         self.refresh_photo(ctx);
         let mobile = cfg!(target_os = "android");
         egui::TopBottomPanel::top("toolbar")
-            .frame(theme::toolbar())
+            .frame(theme::toolbar(ctx))
             .show(ctx, |ui| {
-                if mobile {
-                    ui.spacing_mut().interact_size.y = 36.0;
-                }
-                ui.add_space(4.0);
+                ui.spacing_mut().interact_size.y = if mobile { 30.0 } else { 26.0 };
+                ui.horizontal(|ui| {
+                    brand(ui);
+                    ui.label(
+                        RichText::new("WHP3")
+                            .strong()
+                            .color(ui.visuals().hyperlink_color),
+                    );
+                    let has_projects = self.open_projects.is_some();
+                    let tab_width =
+                        (ui.available_width() - if has_projects { 104.0 } else { 42.0 }).max(28.0);
+                    let tab = egui::Frame::none()
+                        .fill(ui.visuals().selection.bg_fill)
+                        .rounding(9.0_f32)
+                        .inner_margin(egui::Margin::symmetric(8.0, 5.0));
+                    let current_tab = tab.show(ui, |ui| {
+                        ui.set_width((tab_width - 16.0).max(12.0));
+                        ui.add(
+                            egui::Label::new(RichText::new(&self.project_title).strong())
+                                .truncate(),
+                        );
+                    });
+                    if has_projects
+                        && current_tab
+                            .response
+                            .interact(Sense::click())
+                            .on_hover_text("Мои проекты")
+                            .clicked()
+                    {
+                        self.menu_action(ProjectAction::Open);
+                    }
+                    if has_projects && ui.button("+").on_hover_text("Новый проект").clicked()
+                    {
+                        self.menu_action(ProjectAction::New);
+                    }
+                    if has_projects && ui.button("×").on_hover_text("Закрыть проект").clicked()
+                    {
+                        self.menu_action(ProjectAction::Close);
+                    }
+                    ui.menu_button("⋯", |ui| {
+                        ui.set_max_width(240.0);
+                        if has_projects && ui.button("Мои проекты").clicked() {
+                            self.menu_action(ProjectAction::Open);
+                            ui.close_menu();
+                        }
+                        if self.open_updates.is_some() && ui.button("Обновления").clicked()
+                        {
+                            self.menu_action(ProjectAction::Updates);
+                            ui.close_menu();
+                        }
+                        if !self.preview && !self.modeling_open {
+                            let current = self.portrait_sheet.unwrap_or(mobile);
+                            ui.horizontal_wrapped(|ui| {
+                                let portrait = ui.selectable_label(current, "Портрет").clicked();
+                                let landscape = ui.selectable_label(!current, "Альбом").clicked();
+                                if portrait || landscape {
+                                    self.flush_tap();
+                                    self.cancel_mark();
+                                    if portrait != current {
+                                        self.sheet_zoom = 1.0;
+                                        self.sheet_pan = egui::Vec2::ZERO;
+                                    }
+                                    self.portrait_sheet = Some(portrait);
+                                    ui.close_menu();
+                                }
+                            });
+                            self.scan_tools(ui);
+                        }
+                    });
+                });
                 ui.horizontal_wrapped(|ui| {
-                    let title = if mobile {
-                        "Home Planner"
-                    } else {
-                        "WolfCraft Home Planner"
-                    };
-                    ui.heading(RichText::new(title).strong().color(ACCENT));
-                    ui.separator();
                     if ui
-                        .selectable_label(!self.preview && !self.modeling_open, "Лист · 2D")
+                        .selectable_label(!self.preview && !self.modeling_open, "Лист 2D")
                         .clicked()
                     {
                         self.preview = false;
                         self.modeling_open = false;
                     }
-                    if ui.selectable_label(self.preview, "Дом · 3D").clicked() {
+                    if ui.selectable_label(self.preview, "Дом 3D").clicked() {
                         self.modeling_open = false;
                         self.flush_tap();
                         self.cancel_mark();
@@ -519,7 +620,7 @@ impl Editor {
                         self.preview = true;
                     }
                     if ui
-                        .selectable_label(self.modeling_open, "Моделирование · 3D")
+                        .selectable_label(self.modeling_open, "Моделирование")
                         .clicked()
                     {
                         self.flush_tap();
@@ -530,44 +631,6 @@ impl Editor {
                         self.modeling_open = true;
                     }
                 });
-                ui.horizontal_wrapped(|ui| {
-                    if !self.preview && !self.modeling_open {
-                        let current = self.portrait_sheet.unwrap_or(mobile);
-                        let portrait = ui.selectable_label(current, "Портрет").clicked();
-                        let landscape = ui.selectable_label(!current, "Альбом").clicked();
-                        if portrait || landscape {
-                            self.flush_tap();
-                            self.cancel_mark();
-                            if portrait != current {
-                                self.sheet_zoom = 1.0;
-                                self.sheet_pan = egui::Vec2::ZERO;
-                            }
-                            self.portrait_sheet = Some(portrait);
-                        }
-                    }
-                    if self.open_updates.is_some() && ui.button("Обновления").clicked() {
-                        self.flush_tap();
-                        let saved = if self.modeling_open {
-                            self.modeling.save()
-                        } else {
-                            self.save()
-                        };
-                        if let Err(error) = saved {
-                            self.message = format!("Не удалось сохранить проект: {error}");
-                        } else if let Some(open) = &self.open_updates {
-                            if open().is_err() {
-                                self.message = "Не удалось открыть обновления".into();
-                            }
-                        }
-                    }
-                });
-                if !self.preview && !self.modeling_open {
-                    self.scan_tools(ui);
-                }
-                if (self.preview || self.modeling_open) && !self.message.is_empty() {
-                    ui.label(&self.message);
-                }
-                ui.add_space(4.0);
             });
         if self.modeling_open {
             self.modeling.ui(ctx, mobile);
@@ -576,12 +639,12 @@ impl Editor {
         if !self.preview {
             if mobile {
                 egui::TopBottomPanel::bottom("tools")
-                    .frame(theme::toolbar())
+                    .frame(theme::toolbar(ctx))
                     .show(ctx, |ui| self.tools(ui, true));
             } else {
                 egui::SidePanel::left("tools")
                     .exact_width(180.0)
-                    .frame(theme::toolbar())
+                    .frame(theme::toolbar(ctx))
                     .show(ctx, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| self.tools(ui, false));
                     });
@@ -616,7 +679,7 @@ impl Editor {
             self.room_editor(ctx);
         } else {
             egui::TopBottomPanel::bottom("camera")
-                .frame(theme::toolbar())
+                .frame(theme::toolbar(ctx))
                 .show(ctx, |ui| {
                     if mobile {
                         ui.spacing_mut().interact_size.y = 38.0;
@@ -1392,6 +1455,30 @@ impl Editor {
     }
 }
 
+enum ProjectAction {
+    Open,
+    Close,
+    New,
+    Updates,
+}
+
+fn brand(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, 6.0, ACCENT);
+    let origin = rect.min;
+    let at = |x, y| origin + vec2(x, y);
+    painter.add(egui::Shape::line(
+        vec![at(5.0, 12.0), at(12.0, 6.0), at(19.0, 12.0)],
+        Stroke::new(1.6_f32, Color32::WHITE),
+    ));
+    painter.rect_stroke(
+        Rect::from_min_max(at(8.0, 12.0), at(16.0, 19.0)),
+        1.0,
+        Stroke::new(1.4_f32, Color32::WHITE),
+    );
+}
+
 fn floor_color(finish: FloorFinish) -> Color32 {
     let [r, g, b] = finish.color().map(|channel| (channel * 255.0) as u8);
     Color32::from_rgb(r, g, b)
@@ -1413,6 +1500,36 @@ fn snap_point(point: Vec2) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_directories_keep_plans_and_photo_paths_separate() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "homeplanner-projects-{}-{stamp}",
+            std::process::id()
+        ));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+
+        let mut editor = Editor::for_android(first.join("house.json"));
+        editor.plan.wall(Vec2::new(2.0, 2.0), Vec2::new(8.0, 2.0));
+        editor.persist_project().unwrap();
+        let mut editor = Editor::for_android(second.join("house.json"));
+        assert!(editor.plan.walls.is_empty());
+        assert_eq!(editor.photo_path, Some(second.join("plan-photo.gray")));
+        editor.plan.wall(Vec2::new(3.0, 3.0), Vec2::new(8.0, 3.0));
+        editor.persist_project().unwrap();
+
+        let reopened = Editor::for_android(first.join("house.json"));
+        assert_eq!(reopened.photo_path, Some(first.join("plan-photo.gray")));
+        assert_eq!(reopened.plan.walls[0].from, [2.0, 2.0]);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn edit_move_clamps_to_sheet_and_has_one_undo_step() {

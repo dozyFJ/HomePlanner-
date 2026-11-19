@@ -10,4 +10,15 @@
     <style name="HomePlannerEditorTheme" parent="HomePlannerTheme">
         <item name="android:windowFullscreen">true</item>
     </style>
+    <style name="HomePlannerDarkTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:colorAccent">#69C8FB</item>
+        <item name="android:windowBackground">#101C2A</item>
+        <item name="android:statusBarColor">#101C2A</item>
+        <item name="android:navigationBarColor">#101C2A</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+    <style name="HomePlannerDarkEditorTheme" parent="HomePlannerDarkTheme">
+        <item name="android:windowFullscreen">true</item>
+    </style>
 </resources>

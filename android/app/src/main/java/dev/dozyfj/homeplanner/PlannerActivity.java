@@ -7,6 +7,7 @@ import android.graphics.BitmapFactory;
 import android.graphics.ImageDecoder;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
 import android.widget.Toast;
 
 import java.io.DataOutputStream;
@@ -19,9 +20,83 @@ public final class PlannerActivity extends NativeActivity {
     private static final int PICK_PLAN = 71;
     private static final int MAX_SIDE = 1024;
 
+    private volatile String projectKey = Projects.LEGACY;
+    private volatile String projectName = "";
+
+    @Override
+    protected void onCreate(Bundle state) {
+        if (Projects.dark(this)) setTheme(R.style.HomePlannerDarkEditorTheme);
+        acceptProject(getIntent());
+        super.onCreate(state);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        boolean dark = Projects.dark(this);
+        getWindow().setNavigationBarColor(dark ? 0xFF101C2A : 0xFFEDF6FC);
+        android.view.View decor = getWindow().getDecorView();
+        int flags = decor.getSystemUiVisibility();
+        int light = android.view.View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+        decor.setSystemUiVisibility(dark ? flags & ~light : flags | light);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        acceptProject(intent);
+        setIntent(intent);
+    }
+
+    private void acceptProject(Intent intent) {
+        String id = intent.getStringExtra(LauncherActivity.PROJECT_ID);
+        if (!Projects.isId(id)) id = Projects.LEGACY;
+        String title = intent.getStringExtra(LauncherActivity.PROJECT_NAME);
+        projectName = title == null ? getString(R.string.legacy_project) : title;
+        projectKey = (intent.getBooleanExtra(LauncherActivity.PROJECT_MODEL, false) ? "m:" : "h:") + id;
+    }
+
+    public String projectKey() { return projectKey; }
+
+    public String projectTitle() { return projectName; }
+
+    private File projectDirectory() {
+        return new Projects(this).directory(projectKey.substring(2));
+    }
+
     public void showUpdates() {
+        showMenu(LauncherActivity.ONLY_UPDATES);
+    }
+
+    public void showProjects() {
+        showMenu(LauncherActivity.AUTO_OPEN_PROJECTS);
+    }
+
+    public void closeProject() {
         runOnUiThread(() -> startActivity(new Intent(this, LauncherActivity.class)
-                .putExtra(LauncherActivity.ONLY_UPDATES, true)));
+                .putExtra(LauncherActivity.PROJECT_CLOSED, true)));
+    }
+
+    public void showNewProject() {
+        showMenu(LauncherActivity.AUTO_CREATE_PROJECT);
+    }
+
+    private void showMenu(String action) {
+        runOnUiThread(() -> startActivity(new Intent(this, LauncherActivity.class)
+                .putExtra(LauncherActivity.RETURN_TO_EDITOR, true)
+                .putExtra(action, true)));
+    }
+
+    @Override
+    public void onBackPressed() {
+        showMenu(LauncherActivity.RETURN_TO_EDITOR);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        // winit creates a single event loop per process. This process hosts only the editor.
+        if (!isChangingConfigurations()) android.os.Process.killProcess(android.os.Process.myPid());
     }
 
     public void pickPlanPhoto() {
@@ -42,9 +117,10 @@ public final class PlannerActivity extends NativeActivity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode != PICK_PLAN || resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
+        File directory = projectDirectory();
         new Thread(() -> {
             try {
-                storePhoto(uri);
+                storePhoto(uri, directory);
                 runOnUiThread(() -> Toast.makeText(this, "Фото плана загружено", Toast.LENGTH_SHORT).show());
             } catch (Exception error) {
                 runOnUiThread(() -> Toast.makeText(this, "Не удалось открыть фото плана", Toast.LENGTH_LONG).show());
@@ -79,9 +155,9 @@ public final class PlannerActivity extends NativeActivity {
         }
     }
 
-    private void storePhoto(Uri uri) throws IOException {
+    private void storePhoto(Uri uri, File directory) throws IOException {
         Bitmap bitmap = decode(uri);
-        File partial = File.createTempFile("plan-photo-", ".part", getFilesDir());
+        File partial = File.createTempFile("plan-photo-", ".part", directory);
         try {
             try (DataOutputStream out = new DataOutputStream(new FileOutputStream(partial))) {
                 int width = bitmap.getWidth();
@@ -101,7 +177,7 @@ public final class PlannerActivity extends NativeActivity {
                     out.write(gray);
                 }
             }
-            if (!partial.renameTo(new File(getFilesDir(), "plan-photo.gray"))) throw new IOException("Cannot replace photo");
+            if (!partial.renameTo(new File(directory, "plan-photo.gray"))) throw new IOException("Cannot replace photo");
         } finally {
             partial.delete();
             bitmap.recycle();

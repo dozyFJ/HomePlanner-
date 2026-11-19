@@ -30,12 +30,12 @@ struct Graphics {
 }
 
 impl Graphics {
-    fn new(window: Arc<Window>) -> Result<Self, String> {
+    fn new(window: Arc<Window>, dark: bool) -> Result<Self, String> {
         let gpu = GpuContext::new(window.clone(), true, false)?;
         let mut atlases = AtlasManager::new(None)?;
         *atlases.get_mut(AtlasKind::Entities) = FurnishingAtlas::build()?;
         let gui = GuiRenderer::new(&gpu.device, gpu.config.format, &window, &atlases);
-        theme::apply(&gui.ctx);
+        theme::apply(&gui.ctx, dark);
         let furnishings = FurnishingAtlas::upload(&gui.ctx, atlases.get(AtlasKind::Entities));
         let (width, height) = gpu.size();
         let world = WorldRenderer::new(
@@ -126,6 +126,85 @@ struct App {
     started: Instant,
     error: Option<String>,
     smoke_frames: Option<usize>,
+    dark: bool,
+    #[cfg(target_os = "android")]
+    android: Option<AndroidSession>,
+}
+
+impl App {
+    fn new(mut editor: Editor, smoke: bool) -> Self {
+        if smoke {
+            editor.load_example();
+        }
+        Self {
+            editor,
+            window: None,
+            graphics: None,
+            started: Instant::now(),
+            error: None,
+            smoke_frames: smoke.then_some(0),
+            dark: false,
+            #[cfg(target_os = "android")]
+            android: None,
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn sync_android(&mut self) {
+        let Some(session) = &mut self.android else {
+            return;
+        };
+        let dark = session.data.join("dark-mode").is_file();
+        if dark != self.dark {
+            self.dark = dark;
+            if let Some(graphics) = &self.graphics {
+                theme::apply(&graphics.gui.ctx, dark);
+            }
+        }
+        let Ok(key) = android_string(&session.app, jni::jni_str!("projectKey")) else {
+            return;
+        };
+        if session.current.as_deref() == Some(&key) {
+            return;
+        }
+        let Some((modeling, id)) = key.split_once(':') else {
+            return;
+        };
+        let directory = if id == "legacy" {
+            session.data.clone()
+        } else if valid_project_id(id) {
+            session.data.join("projects").join(id)
+        } else {
+            return;
+        };
+        if !directory.is_dir() {
+            return;
+        }
+        if session.current.is_some()
+            && let Err(error) = self.editor.persist_project()
+        {
+            let _ = std::fs::write(session.data.join("planner.log"), error.to_string());
+            return;
+        }
+
+        let mut editor = Editor::for_android(directory.join("house.json"));
+        editor.modeling_open = modeling == "m";
+        if let Ok(title) = android_string(&session.app, jni::jni_str!("projectTitle"))
+            && !title.is_empty()
+        {
+            editor.project_title = title;
+        }
+        editor.open_updates = Some(android_action(&session.app, jni::jni_str!("showUpdates")));
+        editor.open_projects = Some(android_action(&session.app, jni::jni_str!("showProjects")));
+        editor.close_project = Some(android_action(&session.app, jni::jni_str!("closeProject")));
+        editor.open_new_project = Some(android_action(
+            &session.app,
+            jni::jni_str!("showNewProject"),
+        ));
+        editor.open_photo = Some(android_action(&session.app, jni::jni_str!("pickPlanPhoto")));
+        self.editor = editor;
+        session.current = Some(key);
+    }
 }
 
 impl ApplicationHandler for App {
@@ -156,6 +235,8 @@ impl ApplicationHandler for App {
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        #[cfg(target_os = "android")]
+        self.sync_android();
         if self.graphics.is_some() {
             return;
         }
@@ -177,7 +258,7 @@ impl ApplicationHandler for App {
                     window
                 }
             };
-            Graphics::new(window)
+            Graphics::new(window, self.dark)
         })();
         match result {
             Ok(graphics) => {
@@ -192,12 +273,22 @@ impl ApplicationHandler for App {
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        if cfg!(target_os = "android") {
+        #[cfg(target_os = "android")]
+        if let Some(session) = &self.android {
+            if session.current.is_some()
+                && let Err(error) = self.editor.persist_project()
+            {
+                let _ = std::fs::write(session.data.join("planner.log"), error.to_string());
+            }
             self.graphics = None;
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        #[cfg(target_os = "android")]
+        if matches!(event, WindowEvent::Focused(true)) {
+            self.sync_android();
+        }
         let Some(graphics) = self.graphics.as_mut() else {
             return;
         };
@@ -239,25 +330,10 @@ impl ApplicationHandler for App {
 
 pub fn run_desktop() -> Result<(), Box<dyn std::error::Error>> {
     let smoke = std::env::args().any(|arg| arg == "--smoke-test");
-    run(EventLoop::new()?, Editor::default(), smoke)
+    run(EventLoop::new()?, App::new(Editor::default(), smoke))
 }
 
-fn run(
-    event_loop: EventLoop<()>,
-    mut editor: Editor,
-    smoke: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if smoke {
-        editor.load_example();
-    }
-    let mut app = App {
-        editor,
-        window: None,
-        graphics: None,
-        started: Instant::now(),
-        error: None,
-        smoke_frames: smoke.then_some(0),
-    };
+fn run(event_loop: EventLoop<()>, mut app: App) -> Result<(), Box<dyn std::error::Error>> {
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.error {
         return Err(error.into());
@@ -274,20 +350,17 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         return;
     };
     let log = data.join("planner.log");
-    let activity = app.clone();
-    let mut editor = Editor::for_android(data.join("house.json"));
-    editor.open_updates = Some(Box::new(move || {
-        call_android_activity(&activity, jni::jni_str!("showUpdates"))
-    }));
-    let activity = app.clone();
-    editor.open_photo = Some(Box::new(move || {
-        call_android_activity(&activity, jni::jni_str!("pickPlanPhoto"))
-    }));
+    let mut planner = App::new(Editor::default(), false);
+    planner.android = Some(AndroidSession {
+        app: app.clone(),
+        data,
+        current: None,
+    });
     let result = EventLoop::builder()
         .with_android_app(app)
         .build()
         .map_err(|error| error.to_string())
-        .and_then(|event_loop| run(event_loop, editor, false).map_err(|error| error.to_string()));
+        .and_then(|event_loop| run(event_loop, planner).map_err(|error| error.to_string()));
     if let Err(error) = result {
         let _ = std::fs::write(log, error);
     }
@@ -308,4 +381,56 @@ fn call_android_activity(
         Ok(())
     })
     .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "android")]
+struct AndroidSession {
+    app: winit::platform::android::activity::AndroidApp,
+    data: std::path::PathBuf,
+    current: Option<String>,
+}
+
+#[cfg(target_os = "android")]
+fn android_action(
+    app: &winit::platform::android::activity::AndroidApp,
+    method: &'static jni::strings::JNIStr,
+) -> Box<dyn Fn() -> Result<(), String>> {
+    let app = app.clone();
+    Box::new(move || call_android_activity(&app, method))
+}
+
+#[cfg(target_os = "android")]
+fn android_string(
+    activity: &winit::platform::android::activity::AndroidApp,
+    method: &jni::strings::JNIStr,
+) -> Result<String, String> {
+    use jni::{
+        JavaVM, jni_sig,
+        objects::{JObject, JString},
+        refs::Global,
+    };
+    // AndroidApp keeps the Activity global reference alive during this call.
+    let vm = unsafe { JavaVM::from_raw(activity.vm_as_ptr().cast()) };
+    let raw = activity.activity_as_ptr() as jni::sys::jobject;
+    vm.attach_current_thread(|env| -> jni::errors::Result<String> {
+        let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw)? };
+        let object = env
+            .call_method(activity, method, jni_sig!("()Ljava/lang/String;"), &[])?
+            .l()?;
+        let string = env.cast_local::<JString>(object)?;
+        string.try_to_string(env)
+    })
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "android")]
+fn valid_project_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, value)| {
+            if [8, 13, 18, 23].contains(&index) {
+                value == b'-'
+            } else {
+                value.is_ascii_hexdigit()
+            }
+        })
 }

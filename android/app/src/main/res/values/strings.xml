@@ -15,4 +15,16 @@
     <string name="no_vulkan">Для 3D требуется поддержка Vulkan.</string>
     <string name="return_to_editor">Вернуться к проекту</string>
     <string name="update_title">Обновления Home Planner</string>
+    <string name="my_projects">Мои проекты</string>
+    <string name="new_project">Новый проект</string>
+    <string name="create_project">Создать</string>
+    <string name="project_name">Название проекта</string>
+    <string name="untitled_project">Проект без названия</string>
+    <string name="legacy_project">Мой первый проект</string>
+    <string name="no_projects">Сохранённых проектов пока нет.</string>
+    <string name="project_model">3D-модель</string>
+    <string name="project_house">План дома</string>
+    <string name="project_error">Не удалось создать проект</string>
+    <string name="dark_mode">Тёмная тема</string>
+    <string name="theme_error">Не удалось сохранить тему</string>
 </resources>

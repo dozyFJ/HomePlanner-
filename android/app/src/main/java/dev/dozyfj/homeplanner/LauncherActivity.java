@@ -1,6 +1,7 @@
 package dev.dozyfj.homeplanner;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.res.ColorStateList;
@@ -15,6 +16,8 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.widget.Button;
+import android.widget.EditText;
+import android.widget.Switch;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -22,13 +25,21 @@ import android.widget.TextView;
 import androidx.core.content.FileProvider;
 
 import java.io.File;
+import java.io.IOException;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class LauncherActivity extends Activity {
     static final String ONLY_UPDATES = "dev.dozyfj.homeplanner.ONLY_UPDATES";
     private static final int BLUE = 0xFF006C9F;
-    private static final int INK = 0xFF152C41;
+    static final String RETURN_TO_EDITOR = "dev.dozyfj.homeplanner.RETURN_TO_EDITOR";
+    static final String AUTO_OPEN_PROJECTS = "dev.dozyfj.homeplanner.AUTO_OPEN_PROJECTS";
+    static final String PROJECT_CLOSED = "dev.dozyfj.homeplanner.PROJECT_CLOSED";
+    static final String AUTO_CREATE_PROJECT = "dev.dozyfj.homeplanner.AUTO_CREATE_PROJECT";
+    static final String PROJECT_NAME = "dev.dozyfj.homeplanner.PROJECT_NAME";
+    static final String PROJECT_ID = "dev.dozyfj.homeplanner.PROJECT_ID";
+    static final String PROJECT_MODEL = "dev.dozyfj.homeplanner.PROJECT_MODEL";
     private static final int MUTED = 0xFF45647D;
     private static final int BLUE_SURFACE = 0xFFE5F2FB;
     private static final int BORDER = 0xFFD1E4F1;
@@ -38,12 +49,18 @@ public final class LauncherActivity extends Activity {
     private File downloaded;
     private TextView status;
     private Button updates;
+    private boolean dark;
+    private Projects projects;
 
     @Override
     protected void onCreate(Bundle state) {
+        dark = Projects.dark(this);
+        if (dark) setTheme(R.style.HomePlannerDarkTheme);
         super.onCreate(state);
         client = new UpdateClient(this);
+        projects = new Projects(this);
         boolean onlyUpdates = getIntent().getBooleanExtra(ONLY_UPDATES, false);
+        boolean returnToEditor = onlyUpdates || getIntent().getBooleanExtra(RETURN_TO_EDITOR, false);
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         LinearLayout page = new LinearLayout(this);
@@ -79,44 +96,149 @@ public final class LauncherActivity extends Activity {
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
         column.setPadding(dp(14), dp(14), dp(14), dp(10));
-        column.setBackground(surface(Color.WHITE, BORDER, 22));
+        column.setBackground(surface(dark ? 0xFF1E3143 : Color.WHITE, border(), 22));
         LinearLayout.LayoutParams actions = new LinearLayout.LayoutParams(-1, -2);
         actions.topMargin = dp(12);
         page.addView(column, actions);
 
         boolean vulkan = getPackageManager().hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION);
-        Button editor = actionButton(true);
-        if (onlyUpdates) {
-            editor.setText(R.string.return_to_editor);
-            editor.setOnClickListener(view -> finish());
-        } else {
-            editor.setText(R.string.open_editor);
-            editor.setOnClickListener(view -> startActivity(new Intent(this, PlannerActivity.class)));
-            editor.setEnabled(vulkan);
-            if (!vulkan) editor.setAlpha(0.45f);
+        Button create = actionButton(true);
+        create.setText(R.string.new_project);
+        create.setOnClickListener(view -> newProject());
+        addAction(column, create);
+        Button browse = actionButton(false);
+        browse.setText(R.string.my_projects);
+        browse.setOnClickListener(view -> listProjects());
+        addAction(column, browse);
+        create.setEnabled(vulkan);
+        browse.setEnabled(vulkan);
+        if (!vulkan) {
+            create.setAlpha(0.45f);
+            browse.setAlpha(0.45f);
         }
-        column.addView(editor, new LinearLayout.LayoutParams(-1, -2));
-
+        if (returnToEditor) {
+            Button back = actionButton(false);
+            back.setText(R.string.return_to_editor);
+            back.setOnClickListener(view -> finish());
+            addAction(column, back);
+        }
         updates = actionButton(false);
         updates.setOnClickListener(view -> updateAction());
-        LinearLayout.LayoutParams updateLayout = new LinearLayout.LayoutParams(-1, -2);
-        updateLayout.topMargin = dp(8);
-        column.addView(updates, updateLayout);
+        addAction(column, updates);
+
+        Switch theme = new Switch(this);
+        theme.setText(R.string.dark_mode);
+        theme.setMinHeight(dp(48));
+        theme.setPadding(dp(8), dp(8), dp(8), 0);
+        theme.setChecked(dark);
+        column.addView(theme, new LinearLayout.LayoutParams(-1, -2));
+        theme.setOnCheckedChangeListener((button, checked) -> {
+            if (checked == dark) return;
+            try {
+                if (!Projects.setDark(this, checked)) throw new IOException("Cannot change theme");
+                recreate();
+            } catch (IOException error) {
+                button.setChecked(dark);
+                status.setText(R.string.theme_error);
+            }
+        });
 
         status = new TextView(this);
         status.setGravity(Gravity.CENTER);
-        status.setTextColor(MUTED);
+        status.setTextColor(muted());
         status.setPadding(0, dp(10), 0, dp(2));
         column.addView(status);
 
-        if (!vulkan && !onlyUpdates) {
+        if (!vulkan && !returnToEditor) {
             TextView warning = new TextView(this);
             warning.setText(R.string.no_vulkan);
             warning.setGravity(Gravity.CENTER);
-            warning.setTextColor(MUTED);
+            warning.setTextColor(muted());
             column.addView(warning);
         }
         check(onlyUpdates);
+        if (vulkan && state == null) {
+            if (getIntent().getBooleanExtra(AUTO_CREATE_PROJECT, false)) newProject();
+            else if (getIntent().getBooleanExtra(AUTO_OPEN_PROJECTS, false)) listProjects();
+        }
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (getIntent().getBooleanExtra(PROJECT_CLOSED, false)) moveTaskToBack(true);
+        else super.onBackPressed();
+    }
+
+    private int border() { return dark ? 0xFF36546C : BORDER; }
+
+    private int muted() { return dark ? 0xFFAFCBDD : MUTED; }
+
+    private void addAction(LinearLayout column, Button button) {
+        LinearLayout.LayoutParams layout = new LinearLayout.LayoutParams(-1, -2);
+        if (column.getChildCount() > 0) layout.topMargin = dp(8);
+        column.addView(button, layout);
+    }
+
+    private void listProjects() {
+        List<Projects.Project> entries = projects.list(getString(R.string.legacy_project));
+        AlertDialog.Builder dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.my_projects)
+                .setNegativeButton(android.R.string.cancel, null);
+        if (entries.isEmpty()) {
+            dialog.setMessage(R.string.no_projects).setPositiveButton(R.string.new_project, (ignored, which) -> newProject());
+        } else {
+            CharSequence[] labels = new CharSequence[entries.size()];
+            for (int index = 0; index < entries.size(); index++) {
+                Projects.Project project = entries.get(index);
+                labels[index] = project.name() + " · " + getString(project.modeling() ? R.string.project_model : R.string.project_house);
+            }
+            dialog.setItems(labels, (ignored, which) -> openProject(entries.get(which)));
+        }
+        dialog.show();
+    }
+
+    private void newProject() {
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(22), dp(12), dp(22), 0);
+        EditText name = new EditText(this);
+        name.setHint(R.string.project_name);
+        name.setSingleLine(true);
+        name.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        name.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(80)});
+        form.addView(name);
+        android.widget.RadioGroup types = new android.widget.RadioGroup(this);
+        android.widget.RadioButton house = new android.widget.RadioButton(this);
+        house.setId(android.view.View.generateViewId());
+        house.setText(R.string.project_house);
+        types.addView(house);
+        android.widget.RadioButton modeling = new android.widget.RadioButton(this);
+        modeling.setId(android.view.View.generateViewId());
+        modeling.setText(R.string.project_model);
+        types.addView(modeling);
+        types.check(house.getId());
+        form.addView(types);
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.new_project)
+                .setView(form)
+                .setNegativeButton(android.R.string.cancel, null)
+                .setPositiveButton(R.string.create_project, (dialog, which) -> {
+                    String title = name.getText().toString().trim();
+                    if (title.isEmpty()) title = getString(R.string.untitled_project);
+                    try {
+                        openProject(projects.create(title, types.getCheckedRadioButtonId() == modeling.getId()));
+                    } catch (IOException error) {
+                        status.setText(R.string.project_error);
+                    }
+                }).show();
+    }
+
+    private void openProject(Projects.Project project) {
+        startActivity(new Intent(this, PlannerActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                .putExtra(PROJECT_ID, project.id())
+                .putExtra(PROJECT_NAME, project.name())
+                .putExtra(PROJECT_MODEL, project.modeling()));
     }
 
     private Button actionButton(boolean primary) {
@@ -124,10 +246,10 @@ public final class LauncherActivity extends Activity {
         button.setAllCaps(false);
         button.setTextSize(16);
         button.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-        button.setTextColor(primary ? Color.WHITE : BLUE);
+        button.setTextColor(primary ? Color.WHITE : dark ? 0xFFB3E2FF : BLUE);
         button.setBackground(new RippleDrawable(
                 ColorStateList.valueOf(primary ? 0x33FFFFFF : 0x26006C9F),
-                surface(primary ? BLUE : BLUE_SURFACE, primary ? BLUE : BORDER, 14), null));
+                surface(primary ? BLUE : dark ? 0xFF27445E : BLUE_SURFACE, primary ? BLUE : border(), 14), null));
         button.setMinHeight(dp(48));
         button.setPadding(dp(12), dp(8), dp(12), dp(8));
         return button;
