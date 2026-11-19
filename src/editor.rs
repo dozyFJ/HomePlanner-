@@ -71,6 +71,63 @@ impl Tool {
             _ => None,
         }
     }
+
+    fn furnishing(self) -> Option<FurnitureKind> {
+        match self {
+            Self::Bed => Some(FurnitureKind::Bed),
+            Self::Table => Some(FurnitureKind::Table),
+            Self::Sofa => Some(FurnitureKind::Sofa),
+            Self::Cabinet => Some(FurnitureKind::Cabinet),
+            Self::Lamp => Some(FurnitureKind::Lamp),
+            Self::Stair => Some(FurnitureKind::Stair),
+            Self::StairL => Some(FurnitureKind::StairL),
+            Self::StairU => Some(FurnitureKind::StairU),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CatalogCategory {
+    Build,
+    Furniture,
+    Stairs,
+    Edit,
+}
+
+impl CatalogCategory {
+    const ALL: [Self; 4] = [Self::Build, Self::Furniture, Self::Stairs, Self::Edit];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Build => "Стройка",
+            Self::Furniture => "Мебель",
+            Self::Stairs => "Лестницы",
+            Self::Edit => "Правка",
+        }
+    }
+
+    fn tools(self) -> &'static [Tool] {
+        match self {
+            Self::Build => &[
+                Tool::Room,
+                Tool::Wall,
+                Tool::Pencil,
+                Tool::Door,
+                Tool::Window,
+                Tool::Garage,
+            ],
+            Self::Furniture => &[
+                Tool::Bed,
+                Tool::Table,
+                Tool::Sofa,
+                Tool::Cabinet,
+                Tool::Lamp,
+            ],
+            Self::Stairs => &[Tool::Stair, Tool::StairL, Tool::StairU],
+            Self::Edit => &[Tool::House, Tool::Pan, Tool::Edit, Tool::Erase],
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -149,6 +206,8 @@ pub struct Editor {
     pencil: Vec<Vec2>,
     rotated: bool,
     undo: Vec<Plan>,
+    redo: Vec<Plan>,
+    catalog_category: CatalogCategory,
     path: String,
     message: String,
     yaw: f32,
@@ -193,6 +252,8 @@ impl Default for Editor {
             pencil: Vec::new(),
             rotated: false,
             undo: vec![],
+            redo: vec![],
+            catalog_category: CatalogCategory::Build,
             path: "house.json".into(),
             message: String::new(),
             yaw: 0.68,
@@ -221,10 +282,83 @@ impl Editor {
     }
 
     fn remember(&mut self, previous: Plan) {
+        self.redo.clear();
+        self.push_undo(previous);
+    }
+
+    fn push_undo(&mut self, previous: Plan) {
         if self.undo.len() == 40 {
             self.undo.remove(0);
         }
         self.undo.push(previous);
+    }
+
+    fn can_undo(&self) -> bool {
+        self.start.is_some() || !self.pencil.is_empty() || !self.undo.is_empty()
+    }
+
+    fn undo_plan(&mut self, all: bool) {
+        if all || (self.start.is_none() && self.pencil.is_empty()) {
+            while let Some(plan) = self.undo.pop() {
+                self.redo.push(std::mem::replace(&mut self.plan, plan));
+                if !all {
+                    break;
+                }
+            }
+        }
+        self.reset_edit_state();
+    }
+
+    fn redo_plan(&mut self) {
+        if let Some(plan) = self.redo.pop() {
+            let previous = std::mem::replace(&mut self.plan, plan);
+            self.push_undo(previous);
+            self.reset_edit_state();
+        }
+    }
+
+    fn reset_edit_state(&mut self) {
+        self.cancel_mark();
+        self.clear_selection();
+        self.message.clear();
+    }
+
+    fn fit_sheet(&mut self) {
+        self.sheet_pan = egui::Vec2::ZERO;
+        self.sheet_zoom = 1.0;
+    }
+
+    fn sheet_actions(&mut self, ui: &mut egui::Ui) {
+        use navigation::SheetAction;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            let width = ((ui.available_width() - 39.0) / 3.0).min(105.0);
+            for (action, enabled) in [
+                (SheetAction::Undo, self.can_undo()),
+                (SheetAction::Redo, !self.redo.is_empty()),
+                (SheetAction::Fit, true),
+            ] {
+                if action.pill(ui, width, enabled).clicked() {
+                    match action {
+                        SheetAction::Undo => self.undo_plan(false),
+                        SheetAction::Redo => self.redo_plan(),
+                        SheetAction::Fit => self.fit_sheet(),
+                    }
+                }
+            }
+            ui.spacing_mut().interact_size.y = 38.0;
+            ui.menu_button("...", |ui| {
+                if ui
+                    .add_enabled(self.can_undo(), egui::Button::new("Отменить всё"))
+                    .clicked()
+                {
+                    self.undo_plan(true);
+                    ui.close_menu();
+                }
+            })
+            .response
+            .on_hover_text("Действия с холстом");
+        });
     }
 
     pub fn load_example(&mut self) {
@@ -629,23 +763,20 @@ impl Editor {
                     egui::TopBottomPanel::bottom("catalog")
                         .frame(theme::toolbar(ctx))
                         .show(ctx, |ui| {
-                            let max = (ctx.screen_rect().height() * 0.46).clamp(155.0, 305.0);
-                            egui::ScrollArea::vertical().max_height(max).show(ui, |ui| {
-                                self.tool_hint(ui);
-                                self.tools(ui, true);
-                            });
+                            self.catalog(ui, atlas, true);
                         });
                 } else {
                     egui::SidePanel::left("catalog")
-                        .exact_width(180.0)
+                        .exact_width(280.0)
                         .frame(theme::toolbar(ctx))
                         .show(ctx, |ui| {
-                            egui::ScrollArea::vertical().show(ui, |ui| {
-                                self.tool_hint(ui);
-                                self.tools(ui, false);
-                            });
+                            self.catalog(ui, atlas, false);
                         });
                 }
+            } else {
+                egui::TopBottomPanel::bottom("sheet_actions")
+                    .frame(theme::toolbar(ctx))
+                    .show(ctx, |ui| self.sheet_actions(ui));
             }
             egui::CentralPanel::default().show(ctx, |ui| self.sheet(ui, mobile, atlas));
             self.shape_menu(ctx);
@@ -723,53 +854,139 @@ impl Editor {
         });
     }
 
-    fn tools(&mut self, ui: &mut egui::Ui, mobile: bool) {
-        let tools = [
-            Tool::Room,
-            Tool::Wall,
-            Tool::Pencil,
-            Tool::House,
-            Tool::Pan,
-            Tool::Door,
-            Tool::Window,
-            Tool::Garage,
-            Tool::Edit,
-            Tool::Bed,
-            Tool::Table,
-            Tool::Sofa,
-            Tool::Cabinet,
-            Tool::Lamp,
-            Tool::Stair,
-            Tool::StairL,
-            Tool::StairU,
-            Tool::Erase,
-        ];
-        let mut tool_buttons = |ui: &mut egui::Ui| {
-            for tool in tools {
-                let opening = tool.opening();
-                let mut button = egui::Button::new(tool.name()).selected(self.tool == tool);
-                if opening.is_some() {
-                    button = button.sense(Sense::click_and_drag());
+    fn catalog(&mut self, ui: &mut egui::Ui, atlas: &FurnishingAtlas, mobile: bool) {
+        ui.horizontal(|ui| {
+            let (icon, _) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
+            let accent = ui.visuals().hyperlink_color;
+            ui.painter()
+                .rect_filled(icon, 7.0, ui.visuals().selection.bg_fill);
+            Destination::Catalog.icon(ui.painter(), icon.center(), Stroke::new(1.5_f32, accent));
+            ui.label(RichText::new("Каталог").strong().size(17.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_sized([36.0, 32.0], egui::Button::new("×"))
+                    .on_hover_text("Закрыть каталог")
+                    .clicked()
+                {
+                    self.select_destination(Destination::Sheet);
                 }
-                let response = ui.add(button);
-                if let Some(opening) = opening {
-                    response.dnd_set_drag_payload(opening);
-                }
-                if response.clicked() || response.drag_started() {
-                    self.cancel_mark();
-                    self.clear_selection();
-                    self.tool = tool;
-                    self.message.clear();
+            });
+        });
+        if !self.catalog_open {
+            return;
+        }
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 3.0;
+            let width = ((ui.available_width() - 9.0) / 4.0).floor();
+            ui.spacing_mut().button_padding.x = 3.0;
+            for category in CatalogCategory::ALL {
+                let button =
+                    egui::Button::new(category.title()).selected(self.catalog_category == category);
+                if ui.add_sized([width, 34.0], button).clicked() {
+                    self.catalog_category = category;
                 }
             }
-        };
-        if mobile {
-            ui.spacing_mut().interact_size.y = 34.0;
-            ui.horizontal_wrapped(&mut tool_buttons);
+        });
+        ui.separator();
+
+        let category = self.catalog_category;
+        let height = if mobile {
+            (ui.ctx().screen_rect().height() * 0.35).clamp(120.0, 235.0)
         } else {
-            ui.heading("Инструменты");
-            tool_buttons(ui);
+            ui.available_height()
+        };
+        egui::ScrollArea::vertical()
+            .id_salt(("catalog_items", category as u8))
+            .max_height(height)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for &tool in category.tools() {
+                    self.catalog_row(ui, atlas, tool);
+                }
+                match category {
+                    CatalogCategory::Build => {
+                        if ui.button("Готовые формы дома").clicked() {
+                            self.cancel_mark();
+                            self.clear_selection();
+                            self.shape_at = Some(SHEET * 0.5);
+                        }
+                    }
+                    CatalogCategory::Furniture | CatalogCategory::Stairs => {
+                        ui.checkbox(&mut self.rotated, "Повернуть при размещении");
+                    }
+                    CatalogCategory::Edit => self.catalog_edit_actions(ui, mobile),
+                }
+            });
+        if category.tools().contains(&self.tool) || !self.message.is_empty() {
+            self.tool_hint(ui);
         }
+    }
+
+    fn catalog_row(&mut self, ui: &mut egui::Ui, atlas: &FurnishingAtlas, tool: Tool) {
+        let opening = tool.opening();
+        let furnishing = tool.furnishing();
+        let sense = if opening.is_some() {
+            Sense::click_and_drag()
+        } else {
+            Sense::click()
+        };
+        let height = if furnishing.is_some() { 48.0 } else { 41.0 };
+        let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), height), sense);
+        let color = ui.visuals().text_color();
+        let selected = self.tool == tool;
+        let fill = if selected {
+            ui.visuals().selection.bg_fill
+        } else {
+            ui.visuals().widgets.inactive.weak_bg_fill
+        };
+        ui.painter().rect_filled(rect, 10.0, fill);
+        if response.hovered() || selected {
+            let accent = ui.visuals().hyperlink_color;
+            ui.painter()
+                .rect_stroke(rect, 10.0, Stroke::new(1.0_f32, accent));
+        }
+        let text_x = if let Some(kind) = furnishing {
+            let dimensions = kind.dimensions();
+            let scale = (34.0 / dimensions.x).min(31.0 / dimensions.z);
+            let icon = Rect::from_center_size(
+                egui::pos2(rect.left() + 27.0, rect.center().y),
+                vec2(dimensions.x * scale, dimensions.z * scale),
+            );
+            atlas.paint(
+                ui.painter(),
+                kind,
+                [
+                    icon.left_top(),
+                    icon.right_top(),
+                    icon.right_bottom(),
+                    icon.left_bottom(),
+                ],
+            );
+            rect.left() + 54.0
+        } else {
+            rect.left() + 13.0
+        };
+        ui.painter().text(
+            egui::pos2(text_x, rect.center().y),
+            Align2::LEFT_CENTER,
+            tool.name(),
+            FontId::proportional(14.0),
+            color,
+        );
+
+        if let Some(opening) = opening {
+            response.dnd_set_drag_payload(opening);
+        }
+        if response.clicked() || response.drag_started() {
+            self.cancel_mark();
+            self.clear_selection();
+            self.tool = tool;
+            self.message.clear();
+        }
+    }
+
+    fn catalog_edit_actions(&mut self, ui: &mut egui::Ui, mobile: bool) {
         if self.tool == Tool::Pan {
             ui.horizontal_wrapped(|ui| {
                 if ui.button("−").clicked() {
@@ -779,32 +996,19 @@ impl Editor {
                     self.sheet_zoom = (self.sheet_zoom * 1.25).min(5.0);
                 }
                 if ui.button("Вписать лист").clicked() {
-                    self.sheet_pan = egui::Vec2::ZERO;
-                    self.sheet_zoom = 1.0;
+                    self.fit_sheet();
                 }
             });
         } else if self.tool == Tool::Edit && self.furniture_selection.is_some() {
             self.furniture_actions(ui);
-        } else {
-            ui.checkbox(&mut self.rotated, "Повернуть мебель");
         }
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(
-                    self.start.is_some() || !self.undo.is_empty(),
-                    egui::Button::new("Отменить"),
-                )
+                .add_enabled(self.can_undo(), egui::Button::new("Отменить"))
                 .clicked()
             {
-                if self.start.is_none() {
-                    if let Some(plan) = self.undo.pop() {
-                        self.plan = plan;
-                    }
-                }
-                self.cancel_mark();
-                self.clear_selection();
-                self.message.clear();
+                self.undo_plan(false);
             }
             if ui
                 .button(if mobile {
@@ -817,11 +1021,6 @@ impl Editor {
                 self.cancel_mark();
                 self.clear_selection();
                 self.load_example();
-            }
-            if ui.button("Формы").clicked() {
-                self.cancel_mark();
-                self.clear_selection();
-                self.shape_at = Some(SHEET * 0.5);
             }
         });
         if !mobile {
@@ -1407,15 +1606,8 @@ impl Editor {
             Tool::Pencil | Tool::Pan | Tool::House => return,
             Tool::Erase => self.plan.erase(point),
             tool => {
-                let kind = match tool {
-                    Tool::Bed => FurnitureKind::Bed,
-                    Tool::Table => FurnitureKind::Table,
-                    Tool::Cabinet => FurnitureKind::Cabinet,
-                    Tool::Lamp => FurnitureKind::Lamp,
-                    Tool::Stair => FurnitureKind::Stair,
-                    Tool::StairL => FurnitureKind::StairL,
-                    Tool::StairU => FurnitureKind::StairU,
-                    _ => FurnitureKind::Sofa,
+                let Some(kind) = tool.furnishing() else {
+                    return;
                 };
                 let item = Furniture {
                     at: snap.to_array(),
@@ -1690,6 +1882,76 @@ mod tests {
         );
         assert!(editor.sheet_zoom > 1.0);
         assert!(editor.plan.walls.is_empty());
+    }
+
+    #[test]
+    fn bulk_undo_preserves_redo_order_and_a_new_edit_clears_redo() {
+        let mut editor = Editor::default();
+        for y in [2.0, 4.0] {
+            let previous = editor.plan.clone();
+            assert!(editor.plan.wall(Vec2::new(2.0, y), Vec2::new(6.0, y)));
+            editor.remember(previous);
+        }
+        editor.undo_plan(true);
+        assert!(editor.plan.walls.is_empty());
+        editor.redo_plan();
+        assert_eq!(editor.plan.walls.len(), 1);
+        assert_eq!(editor.plan.walls[0].from[1], 2.0);
+        editor.redo_plan();
+        assert_eq!(editor.plan.walls.len(), 2);
+        editor.undo_plan(false);
+        let previous = editor.plan.clone();
+        assert!(editor.plan.wall(Vec2::new(2.0, 6.0), Vec2::new(6.0, 6.0)));
+        editor.remember(previous);
+        assert!(editor.redo.is_empty());
+    }
+
+    #[test]
+    fn catalog_lists_only_the_active_category_and_closes_from_its_header() {
+        let ctx = egui::Context::default();
+        let atlas = FurnishingAtlas::build().unwrap();
+        let atlas = FurnishingAtlas::upload(&ctx, &atlas);
+        let mut editor = Editor {
+            catalog_open: true,
+            catalog_category: CatalogCategory::Furniture,
+            ..Default::default()
+        };
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 700.0));
+        let frame = |editor: &mut Editor, events: Vec<egui::Event>| {
+            ctx.run(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| editor.ui(ctx, &atlas),
+            )
+        };
+        let layout = frame(&mut editor, vec![]);
+        let text = |label| {
+            layout.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(item) if item.galley.text() == label => {
+                    Some(item.pos + item.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+        };
+        assert!(text("Кровать").is_some());
+        assert!(text("Ворота").is_none());
+        assert!(text("Лестница 90°").is_none());
+        let close = text("×").expect("catalog has its own close button");
+        let click = |pressed| egui::Event::PointerButton {
+            pos: close,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(
+            &mut editor,
+            vec![egui::Event::PointerMoved(close), click(true)],
+        );
+        frame(&mut editor, vec![click(false), egui::Event::PointerGone]);
+        assert!(!editor.catalog_open);
     }
 
     #[test]
