@@ -230,21 +230,7 @@ impl Plan {
         let mut end = room.max;
         start[axis] = middle;
         end[axis] = middle;
-        let mut spans: Vec<_> = self
-            .walls
-            .iter()
-            .filter_map(|wall| {
-                if (wall.from[axis] - middle).abs() > 0.001
-                    || (wall.to[axis] - middle).abs() > 0.001
-                {
-                    return None;
-                }
-                let lo = wall.from[along].min(wall.to[along]).max(start[along]);
-                let hi = wall.from[along].max(wall.to[along]).min(end[along]);
-                (lo < hi).then_some((lo, hi))
-            })
-            .collect();
-        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut spans = self.partition_spans(room, axis, middle);
         spans.push((end[along], end[along]));
         for (lo, hi) in spans {
             if lo > start[along] {
@@ -255,6 +241,29 @@ impl Plan {
             start[along] = start[along].max(hi);
         }
 
+        Some(self.divide_floor(index, axis, middle))
+    }
+
+    fn partition_spans(&self, room: Area, axis: usize, at: f32) -> Vec<(f32, f32)> {
+        let along = 1 - axis;
+        let mut spans: Vec<_> = self
+            .walls
+            .iter()
+            .filter_map(|wall| {
+                if (wall.from[axis] - at).abs() > 0.001 || (wall.to[axis] - at).abs() > 0.001 {
+                    return None;
+                }
+                let lo = wall.from[along].min(wall.to[along]).max(room.min[along]);
+                let hi = wall.from[along].max(wall.to[along]).min(room.max[along]);
+                (lo < hi).then_some((lo, hi))
+            })
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        spans
+    }
+
+    fn divide_floor(&mut self, index: usize, axis: usize, middle: f32) -> usize {
+        let room = self.rooms[index];
         let mut first = room;
         let mut second = room;
         first.max[axis] = middle;
@@ -262,7 +271,49 @@ impl Plan {
         self.rooms[index] = first;
         let next = self.rooms.len();
         self.rooms.push(second);
-        Some(next)
+        next
+    }
+
+    pub fn detect_partitions(&mut self) {
+        let candidates: [_; 2] = std::array::from_fn(|axis| {
+            let mut positions: Vec<_> = self
+                .walls
+                .iter()
+                .filter(|wall| (wall.from[axis] - wall.to[axis]).abs() <= 0.001)
+                .map(|wall| wall.from[axis])
+                .collect();
+            positions.sort_by(f32::total_cmp);
+            positions.dedup();
+            positions
+        });
+        let mut index = 0;
+        while let Some(&room) = self.rooms.get(index) {
+            let partition = candidates.iter().enumerate().find_map(|(axis, positions)| {
+                let along = 1 - axis;
+                positions
+                    .iter()
+                    .copied()
+                    .find(|&at| {
+                        if at - room.min[axis] < 0.5 || room.max[axis] - at < 0.5 {
+                            return false;
+                        }
+                        let mut covered = room.min[along];
+                        for (lo, hi) in self.partition_spans(room, axis, at) {
+                            if lo > covered + 0.001 {
+                                return false;
+                            }
+                            covered = covered.max(hi);
+                        }
+                        covered >= room.max[along] - 0.001
+                    })
+                    .map(|at| (axis, at))
+            });
+            if let Some((axis, at)) = partition {
+                self.divide_floor(index, axis, at);
+            } else {
+                index += 1;
+            }
+        }
     }
 
     pub fn l_room(&mut self, origin: Vec2) {
@@ -583,6 +634,32 @@ pub fn model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rectangular_sections_appear_when_partition_segments_connect() {
+        let mut plan = Plan::default();
+        assert!(plan.room(Vec2::ZERO, Vec2::new(8.0, 8.0)));
+        assert!(plan.wall(Vec2::new(4.0, 0.0), Vec2::new(4.0, 3.0)));
+        assert!(plan.wall(Vec2::new(0.0, 5.0), Vec2::new(4.0, 5.0)));
+        assert!(plan.wall(Vec2::new(4.0, 2.0), Vec2::new(8.0, 2.0)));
+        plan.detect_partitions();
+        assert_eq!(plan.rooms.len(), 1);
+        assert!(plan.wall(Vec2::new(4.0, 8.0), Vec2::new(4.0, 3.0)));
+        let wall_count = plan.walls.len();
+        plan.detect_partitions();
+        assert_eq!(plan.rooms.len(), 4);
+        assert_eq!(plan.walls.len(), wall_count);
+        assert_ne!(
+            plan.room_at(Vec2::new(2.0, 2.0)),
+            plan.room_at(Vec2::new(2.0, 7.0))
+        );
+        assert_ne!(
+            plan.room_at(Vec2::new(6.0, 1.0)),
+            plan.room_at(Vec2::new(6.0, 5.0))
+        );
+        plan.detect_partitions();
+        assert_eq!(plan.rooms.len(), 4);
+    }
 
     #[test]
     fn split_room_preserves_the_perimeter_and_existing_partition_opening() {

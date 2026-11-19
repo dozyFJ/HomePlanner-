@@ -181,3 +181,109 @@ impl SheetAction {
         .inner
     }
 }
+
+#[derive(Clone, Copy)]
+pub enum BuildIcon {
+    Room,
+    Wall,
+    Pencil,
+    Door,
+    Window,
+    Garage,
+    Shapes,
+    Close,
+}
+
+impl BuildIcon {
+    pub fn floating(
+        self,
+        ctx: &egui::Context,
+        id: impl std::hash::Hash,
+        center: Pos2,
+        label: &str,
+        selected: bool,
+        sense: Sense,
+    ) -> egui::Response {
+        let size = vec2(54.0, 48.0);
+        egui::Area::new(egui::Id::new(id))
+            .fixed_pos(center - size * 0.5)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let (rect, response) = ui.allocate_exact_size(size, sense);
+                response.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label)
+                });
+                let painter = ui.painter();
+                let color = if selected || response.hovered() {
+                    egui::Color32::from_rgb(106, 211, 255)
+                } else {
+                    egui::Color32::WHITE
+                };
+                let shadow = egui::Color32::from_rgb(16, 34, 49);
+                let icon_center = rect.center_top() + vec2(0.0, 17.0);
+                self.paint(painter, icon_center, Stroke::new(4.0_f32, shadow));
+                self.paint(painter, icon_center, Stroke::new(1.7_f32, color));
+                let position = rect.center_bottom() - vec2(0.0, 5.0);
+                let font = FontId::proportional(11.0);
+                for offset in [vec2(1., 0.), vec2(-1., 0.), vec2(0., 1.), vec2(0., -1.)] {
+                    painter.text(
+                        position + offset,
+                        Align2::CENTER_BOTTOM,
+                        label,
+                        font.clone(),
+                        shadow,
+                    );
+                }
+                painter.text(position, Align2::CENTER_BOTTOM, label, font, color);
+                response
+            })
+            .inner
+    }
+
+    fn paint(self, painter: &egui::Painter, center: Pos2, stroke: Stroke) {
+        let p = |x, y| center + vec2(x, y);
+        let line = |x, y, xx, yy| painter.line_segment([p(x, y), p(xx, yy)], stroke);
+        let rect =
+            |x, y, xx, yy| painter.rect_stroke(Rect::from_min_max(p(x, y), p(xx, yy)), 1.5, stroke);
+        match self {
+            Self::Room => {
+                rect(-9., -8., 9., 8.);
+                line(0., -8., 0., 2.);
+            }
+            Self::Wall => {
+                rect(-10., -7., 10., 7.);
+                line(-10., 0., 10., 0.);
+                line(-3., -7., -3., 0.);
+                line(4., 0., 4., 7.);
+            }
+            Self::Pencil => {
+                painter.add(egui::Shape::closed_line(
+                    vec![p(-8., 8.), p(-6., 2.), p(5., -9.), p(9., -5.), p(-2., 6.)],
+                    stroke,
+                ));
+                line(2., -6., 6., -2.);
+            }
+            Self::Door => {
+                rect(-7., -9., 7., 9.);
+                line(1., 1., 4., 1.);
+            }
+            Self::Window => {
+                rect(-9., -8., 9., 8.);
+                line(0., -8., 0., 8.);
+                line(-9., 0., 9., 0.);
+            }
+            Self::Garage => {
+                rect(-10., -8., 10., 8.);
+                line(-10., -3., 10., -3.);
+                line(-10., 2., 10., 2.);
+            }
+            Self::Shapes => {
+                Destination::House.icon(painter, center, stroke);
+            }
+            Self::Close => {
+                line(-6., -6., 6., 6.);
+                line(-6., 6., 6., -6.);
+            }
+        }
+    }
+}

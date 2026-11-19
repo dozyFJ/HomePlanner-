@@ -89,18 +89,16 @@ impl Tool {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum CatalogCategory {
-    Build,
     Furniture,
     Stairs,
     Edit,
 }
 
 impl CatalogCategory {
-    const ALL: [Self; 4] = [Self::Build, Self::Furniture, Self::Stairs, Self::Edit];
+    const ALL: [Self; 3] = [Self::Furniture, Self::Stairs, Self::Edit];
 
     fn title(self) -> &'static str {
         match self {
-            Self::Build => "Стройка",
             Self::Furniture => "Мебель",
             Self::Stairs => "Лестницы",
             Self::Edit => "Правка",
@@ -109,14 +107,6 @@ impl CatalogCategory {
 
     fn tools(self) -> &'static [Tool] {
         match self {
-            Self::Build => &[
-                Tool::Room,
-                Tool::Wall,
-                Tool::Pencil,
-                Tool::Door,
-                Tool::Window,
-                Tool::Garage,
-            ],
             Self::Furniture => &[
                 Tool::Bed,
                 Tool::Table,
@@ -218,7 +208,9 @@ pub struct Editor {
     rotated: bool,
     undo: Vec<Plan>,
     redo: Vec<Plan>,
+    plan_dirty: bool,
     catalog_category: CatalogCategory,
+    build_open: bool,
     path: String,
     message: String,
     yaw: f32,
@@ -267,7 +259,9 @@ impl Default for Editor {
             rotated: false,
             undo: vec![],
             redo: vec![],
-            catalog_category: CatalogCategory::Build,
+            plan_dirty: false,
+            catalog_category: CatalogCategory::Furniture,
+            build_open: false,
             path: "house.json".into(),
             message: String::new(),
             yaw: 0.68,
@@ -291,13 +285,23 @@ impl Editor {
                 editor.message = error.to_string();
             }
             editor.undo.clear();
+            editor.plan_dirty = false;
         }
         editor
     }
 
     fn remember(&mut self, previous: Plan) {
         self.redo.clear();
+        self.plan_dirty = true;
         self.push_undo(previous);
+    }
+
+    fn remember_wall_changes(&mut self, previous: Plan) {
+        self.plan.detect_partitions();
+        if let Some((a, b)) = self.outline_bounds() {
+            self.house_selection = HouseSelection::at(&self.plan, (a + b) * 0.5);
+        }
+        self.remember(previous);
     }
 
     fn push_undo(&mut self, previous: Plan) {
@@ -315,6 +319,7 @@ impl Editor {
         if all || (self.start.is_none() && self.pencil.is_empty()) {
             while let Some(plan) = self.undo.pop() {
                 self.redo.push(std::mem::replace(&mut self.plan, plan));
+                self.plan_dirty = true;
                 if !all {
                     break;
                 }
@@ -327,6 +332,7 @@ impl Editor {
         if let Some(plan) = self.redo.pop() {
             let previous = std::mem::replace(&mut self.plan, plan);
             self.push_undo(previous);
+            self.plan_dirty = true;
             self.reset_edit_state();
         }
     }
@@ -426,7 +432,7 @@ impl Editor {
 
     fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         let path = PathBuf::from(self.path.trim());
-        fs::write(path, serde_json::to_vec_pretty(&self.plan)?)?;
+        crate::write_project_file(&path, &serde_json::to_vec_pretty(&self.plan)?)?;
         Ok(())
     }
 
@@ -560,7 +566,7 @@ impl Editor {
                 if let Some(start) = self.start.take() {
                     let previous = self.plan.clone();
                     if self.plan.wall(start, point) {
-                        self.remember(previous);
+                        self.remember_wall_changes(previous);
                     }
                 } else {
                     self.start = Some(point);
@@ -823,6 +829,15 @@ impl Editor {
         });
     }
 
+    #[cfg(any(target_os = "android", test))]
+    pub fn autosave_project(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.plan_dirty {
+            self.save()?;
+            self.plan_dirty = false;
+        }
+        self.modeling.autosave()
+    }
+
     pub fn persist_project(&self) -> Result<(), Box<dyn std::error::Error>> {
         if !self.modeling_open
             || PathBuf::from(&self.path).is_file()
@@ -858,6 +873,7 @@ impl Editor {
 
     pub fn ui(&mut self, ctx: &egui::Context, atlas: &FurnishingAtlas) {
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.build_open = false;
             self.cancel_mark();
             self.shape_at = None;
             self.clear_selection();
@@ -1011,7 +1027,11 @@ impl Editor {
                     .frame(theme::toolbar(ctx))
                     .show(ctx, |ui| self.sheet_actions(ui));
             }
+            let canvas = ctx.available_rect();
             egui::CentralPanel::default().show(ctx, |ui| self.sheet(ui, mobile, atlas));
+            if !self.catalog_open {
+                self.build_menu(ctx, canvas);
+            }
             self.shape_menu(ctx);
             self.outline_menu(ctx);
             self.wall_editor(ctx);
@@ -1061,6 +1081,7 @@ impl Editor {
         self.preview = destination == Destination::House;
         self.modeling_open = destination == Destination::Scene;
         self.catalog_open = destination == Destination::Catalog;
+        self.build_open = false;
     }
 
     fn tool_hint(&self, ui: &mut egui::Ui) {
@@ -1088,6 +1109,82 @@ impl Editor {
         });
     }
 
+    fn build_menu(&mut self, ctx: &egui::Context, canvas: Rect) {
+        if self.shape_at.is_some()
+            || self.outline_room.is_some()
+            || self.wall_edit.is_some()
+            || self.room_edit.is_some()
+        {
+            return;
+        }
+        use navigation::BuildIcon;
+        let center = egui::pos2(canvas.center().x, canvas.bottom() - 31.0);
+        let (label, icon) = if self.build_open {
+            ("Закрыть", BuildIcon::Close)
+        } else {
+            ("Стройка", BuildIcon::Room)
+        };
+        if icon
+            .floating(
+                ctx,
+                "build_toggle",
+                center,
+                label,
+                self.build_open,
+                Sense::click(),
+            )
+            .clicked()
+        {
+            self.build_open = !self.build_open;
+        }
+        if !self.build_open {
+            return;
+        }
+
+        let actions = [
+            (Some(Tool::Room), BuildIcon::Room),
+            (Some(Tool::Wall), BuildIcon::Wall),
+            (Some(Tool::Pencil), BuildIcon::Pencil),
+            (Some(Tool::Door), BuildIcon::Door),
+            (Some(Tool::Window), BuildIcon::Window),
+            (Some(Tool::Garage), BuildIcon::Garage),
+            (None, BuildIcon::Shapes),
+        ];
+        let radius = ((canvas.width() - 65.0) * 0.5).clamp(65.0, 122.0);
+        let rise = (canvas.height() - 62.0).clamp(54.0, radius);
+        for (index, (tool, icon)) in actions.into_iter().enumerate() {
+            let angle = std::f32::consts::PI * index as f32 / (actions.len() - 1) as f32;
+            let point = center - vec2(radius * angle.cos(), rise * angle.sin());
+            let opening = tool.and_then(Tool::opening);
+            let sense = if opening.is_some() {
+                Sense::click_and_drag()
+            } else {
+                Sense::click()
+            };
+            let label = tool.map_or("Формы", Tool::name);
+            let response = icon.floating(
+                ctx,
+                ("build_tool", index),
+                point,
+                label,
+                tool == Some(self.tool),
+                sense,
+            );
+            if let Some(opening) = opening {
+                response.dnd_set_drag_payload(opening);
+            }
+            if response.clicked() || response.drag_started() {
+                self.reset_edit_state();
+                self.build_open = false;
+                if let Some(tool) = tool {
+                    self.tool = tool;
+                } else {
+                    self.shape_at = Some(SHEET * 0.5);
+                }
+            }
+        }
+    }
+
     fn catalog(&mut self, ui: &mut egui::Ui, atlas: &FurnishingAtlas, mobile: bool) {
         ui.horizontal(|ui| {
             let (icon, _) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::hover());
@@ -1112,7 +1209,7 @@ impl Editor {
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 3.0;
-            let width = ((ui.available_width() - 9.0) / 4.0).floor();
+            let width = ((ui.available_width() - 6.0) / 3.0).floor();
             ui.spacing_mut().button_padding.x = 3.0;
             for category in CatalogCategory::ALL {
                 let button =
@@ -1139,13 +1236,6 @@ impl Editor {
                     self.catalog_row(ui, atlas, tool);
                 }
                 match category {
-                    CatalogCategory::Build => {
-                        if ui.button("Готовые формы дома").clicked() {
-                            self.cancel_mark();
-                            self.clear_selection();
-                            self.shape_at = Some(SHEET * 0.5);
-                        }
-                    }
                     CatalogCategory::Furniture | CatalogCategory::Stairs => {
                         ui.checkbox(&mut self.rotated, "Повернуть при размещении");
                     }
@@ -1329,7 +1419,7 @@ impl Editor {
                 .plan
                 .resize_wall(edit.index, edit.length, edit.thickness)
             {
-                self.remember(previous);
+                self.remember_wall_changes(previous);
                 self.clear_selection();
                 self.message.clear();
             } else {
@@ -1691,7 +1781,7 @@ impl Editor {
                             added |= self.plan.wall(pair[0], pair[1]);
                         }
                         if added {
-                            self.remember(previous);
+                            self.remember_wall_changes(previous);
                             self.message.clear();
                         }
                     }
@@ -1862,7 +1952,11 @@ impl Editor {
             }
         };
         if changed {
-            self.remember(previous);
+            if self.tool == Tool::Wall {
+                self.remember_wall_changes(previous);
+            } else {
+                self.remember(previous);
+            }
         } else {
             self.message = "Элемент не помещается или здесь нечего удалить".into();
         }
@@ -1958,13 +2052,35 @@ mod tests {
         fs::create_dir_all(&second).unwrap();
 
         let mut editor = Editor::for_android(first.join("house.json"));
-        editor.plan.wall(Vec2::new(2.0, 2.0), Vec2::new(8.0, 2.0));
-        editor.persist_project().unwrap();
+        editor.tool = Tool::Wall;
+        editor.apply(Vec2::new(2.0, 2.0));
+        editor.autosave_project().unwrap();
+        assert!(!first.join("house.json").exists());
+        editor.apply(Vec2::new(8.0, 2.0));
+        editor.autosave_project().unwrap();
+        assert!(!editor.plan_dirty);
         let mut editor = Editor::for_android(second.join("house.json"));
         assert!(editor.plan.walls.is_empty());
         assert_eq!(editor.photo_path, Some(second.join("plan-photo.gray")));
-        editor.plan.wall(Vec2::new(3.0, 3.0), Vec2::new(8.0, 3.0));
-        editor.persist_project().unwrap();
+        editor.tool = Tool::Wall;
+        editor.apply(Vec2::new(3.0, 3.0));
+        editor.apply(Vec2::new(8.0, 3.0));
+        editor.autosave_project().unwrap();
+        assert_eq!(
+            Editor::for_android(second.join("house.json"))
+                .plan
+                .walls
+                .len(),
+            1
+        );
+        editor.undo_plan(false);
+        editor.autosave_project().unwrap();
+        assert!(
+            Editor::for_android(second.join("house.json"))
+                .plan
+                .walls
+                .is_empty()
+        );
 
         let reopened = Editor::for_android(first.join("house.json"));
         assert_eq!(reopened.photo_path, Some(first.join("plan-photo.gray")));
@@ -2134,9 +2250,11 @@ mod tests {
         editor.outline_tap(Vec2::new(8.0, 12.0));
         editor.select_destination(Destination::Sheet);
         assert_eq!(editor.plan.walls.len(), 5);
+        assert_eq!(editor.plan.rooms.len(), 2);
         assert!(editor.outline_room.is_none());
         editor.undo_plan(false);
         assert_eq!(editor.plan.walls.len(), 4);
+        assert_eq!(editor.plan.rooms.len(), 1);
     }
 
     #[test]
@@ -2215,7 +2333,7 @@ mod tests {
         let atlas = FurnishingAtlas::build().unwrap();
         let atlas = FurnishingAtlas::upload(&ctx, &atlas);
         let mut editor = Editor {
-            catalog_open: true,
+            build_open: true,
             ..Default::default()
         };
         assert!(editor.plan.wall(Vec2::new(4.0, 8.0), Vec2::new(20.0, 8.0)));
@@ -2231,6 +2349,7 @@ mod tests {
                 |ctx| editor.ui(ctx, &atlas),
             )
         };
+        frame(&mut editor, vec![]);
         let layout = frame(&mut editor, vec![]);
         let source = layout
             .shapes

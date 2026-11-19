@@ -23,6 +23,26 @@ use wolfcraft_common::gpu::GpuContext;
 use wolfcraft_engine::renderer::WorldRenderer;
 use wolfcraft_ui::GuiRenderer;
 
+fn write_project_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::{
+        fs,
+        io::Write,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let name = format!(".homeplanner-{}-{sequence}.tmp", std::process::id());
+    let temporary = path.with_file_name(name);
+    let mut file = fs::File::create_new(&temporary)?;
+    let result = file.write_all(data).and_then(|_| file.sync_all());
+    drop(file);
+    let result = result.and_then(|_| fs::rename(&temporary, path));
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 struct Graphics {
     gpu: GpuContext,
     gui: GuiRenderer,
@@ -187,7 +207,7 @@ impl App {
             return;
         }
         if session.current.is_some()
-            && let Err(error) = self.editor.persist_project()
+            && let Err(error) = self.editor.autosave_project()
         {
             let _ = std::fs::write(session.data.join("planner.log"), error.to_string());
             return;
@@ -282,7 +302,7 @@ impl ApplicationHandler for App {
         #[cfg(target_os = "android")]
         if let Some(session) = &self.android {
             if session.current.is_some()
-                && let Err(error) = self.editor.persist_project()
+                && let Err(error) = self.editor.autosave_project()
             {
                 let _ = std::fs::write(session.data.join("planner.log"), error.to_string());
             }
@@ -313,6 +333,13 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 graphics.frame(&mut self.editor, self.started.elapsed().as_secs_f32());
+                #[cfg(target_os = "android")]
+                if let Some(session) = &self.android
+                    && session.current.is_some()
+                    && let Err(error) = self.editor.autosave_project()
+                {
+                    let _ = std::fs::write(session.data.join("planner.log"), error.to_string());
+                }
                 if let Some(frames) = &mut self.smoke_frames {
                     *frames += 1;
                     self.editor.preview = *frames < 3;

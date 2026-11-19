@@ -109,6 +109,7 @@ pub struct Modeling {
     cubes: Vec<Cube>,
     selected: Option<usize>,
     undo: Vec<Vec<Cube>>,
+    dirty: bool,
     path: PathBuf,
     message: String,
     view: View,
@@ -127,6 +128,7 @@ impl Default for Modeling {
             cubes: vec![STARTER],
             selected: Some(0),
             undo: vec![],
+            dirty: false,
             path: PathBuf::from("model.json"),
             message: String::new(),
             view: View::Orbit,
@@ -147,6 +149,7 @@ impl Modeling {
         self.path = path;
         if self.path.is_file() {
             self.open();
+            self.dirty = false;
         }
     }
 
@@ -155,7 +158,16 @@ impl Modeling {
     }
 
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
-        fs::write(&self.path, serde_json::to_vec_pretty(&self.cubes)?)?;
+        crate::write_project_file(&self.path, &serde_json::to_vec_pretty(&self.cubes)?)?;
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "android", test))]
+    pub fn autosave(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.dirty {
+            self.save()?;
+            self.dirty = false;
+        }
         Ok(())
     }
 
@@ -184,6 +196,7 @@ impl Modeling {
     }
 
     fn remember(&mut self) {
+        self.dirty = true;
         if self.undo.len() == 30 {
             self.undo.remove(0);
         }
@@ -384,6 +397,7 @@ impl Modeling {
                     {
                         if let Some(cubes) = self.undo.pop() {
                             self.cubes = cubes;
+                            self.dirty = true;
                         }
                         self.selected = self.selected.filter(|index| *index < self.cubes.len());
                         self.drag = None;
