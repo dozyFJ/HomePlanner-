@@ -1,5 +1,6 @@
 mod editor;
 mod furnishings;
+mod modeling;
 mod plan;
 
 use std::{sync::Arc, time::Instant};
@@ -59,14 +60,22 @@ impl Graphics {
             .gui
             .run(&self.gpu.window, |ctx| editor.ui(ctx, &self.furnishings));
         let (width, height) = self.gpu.size();
-        if editor.preview {
-            let params = editor.camera(width as f32 / height as f32, elapsed);
-            let model = plan::model(
-                &editor.plan,
-                params.eye.as_vec3(),
-                editor.cutaway,
-                Some(&self.furnishings),
-            );
+        if editor.preview || editor.modeling_open {
+            let aspect = width as f32 / height as f32;
+            let (params, model) = if editor.modeling_open {
+                let params = editor.modeling.frame_params(aspect, elapsed);
+                let model = editor.modeling.vertices(params.eye.as_vec3());
+                (params, model)
+            } else {
+                let params = editor.camera(aspect, elapsed);
+                let model = plan::model(
+                    &editor.plan,
+                    params.eye.as_vec3(),
+                    editor.cutaway,
+                    Some(&self.furnishings),
+                );
+                (params, model)
+            };
             self.world
                 .set_model(&self.gpu.device, &self.gpu.queue, &model);
             self.world.render(
@@ -179,8 +188,9 @@ impl ApplicationHandler for App {
                 graphics.frame(&mut self.editor, self.started.elapsed().as_secs_f32());
                 if let Some(frames) = &mut self.smoke_frames {
                     *frames += 1;
-                    self.editor.preview = true;
-                    if *frames >= 3 {
+                    self.editor.preview = *frames < 3;
+                    self.editor.modeling_open = *frames >= 3;
+                    if *frames >= 5 {
                         graphics.gpu.device.poll(wgpu::Maintain::Wait);
                         event_loop.exit();
                     } else {

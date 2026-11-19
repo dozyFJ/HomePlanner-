@@ -9,6 +9,7 @@ use glam::{Vec2, Vec3};
 use wolfcraft_engine::renderer::FrameParams;
 
 use crate::furnishings::FurnishingAtlas;
+use crate::modeling::Modeling;
 use crate::plan::{FloorFinish, Furniture, FurnitureKind, OpeningKind, Plan, SHEET};
 
 const PAPER: Color32 = Color32::from_rgb(246, 244, 235);
@@ -104,6 +105,8 @@ pub struct Editor {
     pub open_updates: Option<Box<dyn Fn() -> Result<(), String>>>,
     pub plan: Plan,
     pub preview: bool,
+    pub modeling_open: bool,
+    pub modeling: Modeling,
     pub cutaway: bool,
     tool: Tool,
     start: Option<Vec2>,
@@ -130,6 +133,8 @@ impl Default for Editor {
             plan: Plan::default(),
             open_updates: None,
             preview: false,
+            modeling_open: false,
+            modeling: Modeling::default(),
             cutaway: false,
             tool: Tool::Room,
             start: None,
@@ -159,6 +164,7 @@ impl Editor {
             path: path.to_string_lossy().into_owned(),
             ..Self::default()
         };
+        editor.modeling.set_path(path.with_file_name("model.json"));
         if path.is_file() {
             if let Err(error) = editor.open() {
                 editor.message = error.to_string();
@@ -396,10 +402,15 @@ impl Editor {
                 };
                 ui.heading(RichText::new(title).strong());
                 ui.separator();
-                if ui.selectable_label(!self.preview, "Лист · 2D").clicked() {
+                if ui
+                    .selectable_label(!self.preview && !self.modeling_open, "Лист · 2D")
+                    .clicked()
+                {
                     self.preview = false;
+                    self.modeling_open = false;
                 }
-                if ui.selectable_label(self.preview, "Обзор · 3D").clicked() {
+                if ui.selectable_label(self.preview, "Дом · 3D").clicked() {
+                    self.modeling_open = false;
                     self.flush_tap();
                     self.cancel_mark();
                     self.shape_at = None;
@@ -407,9 +418,20 @@ impl Editor {
                     self.message.clear();
                     self.preview = true;
                 }
+                if ui
+                    .selectable_label(self.modeling_open, "Моделирование · 3D")
+                    .clicked()
+                {
+                    self.flush_tap();
+                    self.cancel_mark();
+                    self.clear_selection();
+                    self.shape_at = None;
+                    self.preview = false;
+                    self.modeling_open = true;
+                }
             });
             ui.horizontal_wrapped(|ui| {
-                if !self.preview {
+                if !self.preview && !self.modeling_open {
                     let current = self.portrait_sheet.unwrap_or(mobile);
                     let portrait = ui.selectable_label(current, "Портрет").clicked();
                     let landscape = ui.selectable_label(!current, "Альбом").clicked();
@@ -421,7 +443,12 @@ impl Editor {
                 }
                 if self.open_updates.is_some() && ui.button("Обновления").clicked() {
                     self.flush_tap();
-                    if let Err(error) = self.save() {
+                    let saved = if self.modeling_open {
+                        self.modeling.save()
+                    } else {
+                        self.save()
+                    };
+                    if let Err(error) = saved {
                         self.message = format!("Не удалось сохранить проект: {error}");
                     } else if let Some(open) = &self.open_updates {
                         if open().is_err() {
@@ -430,11 +457,15 @@ impl Editor {
                     }
                 }
             });
-            if self.preview && !self.message.is_empty() {
+            if (self.preview || self.modeling_open) && !self.message.is_empty() {
                 ui.label(&self.message);
             }
             ui.add_space(4.0);
         });
+        if self.modeling_open {
+            self.modeling.ui(ctx, mobile);
+            return;
+        }
         if !self.preview {
             if mobile {
                 egui::TopBottomPanel::bottom("tools").show(ctx, |ui| self.tools(ui, true));
