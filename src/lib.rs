@@ -3,6 +3,8 @@ mod furnishings;
 mod modeling;
 mod plan;
 mod scan;
+mod sheet_edit;
+mod theme;
 
 use std::{sync::Arc, time::Instant};
 
@@ -33,6 +35,7 @@ impl Graphics {
         let mut atlases = AtlasManager::new(None)?;
         *atlases.get_mut(AtlasKind::Entities) = FurnishingAtlas::build()?;
         let gui = GuiRenderer::new(&gpu.device, gpu.config.format, &window, &atlases);
+        theme::apply(&gui.ctx);
         let furnishings = FurnishingAtlas::upload(&gui.ctx, atlases.get(AtlasKind::Entities));
         let (width, height) = gpu.size();
         let world = WorldRenderer::new(
@@ -85,8 +88,8 @@ impl Graphics {
                 &mut encoder,
                 &view,
                 &params,
-                [0.075, 0.11, 0.14],
-                [0.075, 0.11, 0.14],
+                theme::VIEWPORT,
+                theme::VIEWPORT,
             );
         } else {
             encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

@@ -249,122 +249,125 @@ impl Modeling {
         if cancelled {
             self.drag = None;
         }
-        egui::TopBottomPanel::bottom("model_tools").show(ctx, |ui| {
-            if mobile {
-                ui.spacing_mut().interact_size.y = 31.0;
-            }
-            ui.horizontal_wrapped(|ui| {
-                for (mode, label) in [
-                    (Mode::Orbit, "Орбита"),
-                    (Mode::Pan, "Сдвиг"),
-                    (Mode::Move, "Двигать куб"),
-                ] {
-                    if ui.selectable_label(self.mode == mode, label).clicked() {
-                        self.mode = mode;
-                        self.drag = None;
-                    }
+        egui::TopBottomPanel::bottom("model_tools")
+            .frame(crate::theme::toolbar())
+            .show(ctx, |ui| {
+                if mobile {
+                    ui.spacing_mut().interact_size.y = 31.0;
                 }
-                if ui.button("−").clicked() {
-                    self.zoom(1.18);
-                }
-                if ui.button("+").clicked() {
-                    self.zoom(1.0 / 1.18);
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                for (view, label) in [
-                    (View::Orbit, "Перспектива"),
-                    (View::Top, "Сверху"),
-                    (View::Front, "Спереди"),
-                    (View::Right, "Справа"),
-                ] {
-                    if ui.selectable_label(self.view == view, label).clicked() {
-                        self.set_view(view);
-                    }
-                }
-                if ui.button("В кадр").clicked() {
-                    self.focus();
-                }
-            });
-            ui.separator();
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("+ Куб").clicked() {
-                    let x = self
-                        .cubes
-                        .iter()
-                        .map(|cube| cube.center[0] + cube.size * 0.5)
-                        .fold(-1.25, f32::max);
-                    let cube = Cube {
-                        center: [(x + 1.25).min(98.0), 1.0, 0.0],
-                        size: 2.0,
-                        angle: 0.0,
-                    };
-                    self.append(cube);
-                    self.focus();
-                }
-                if let Some(index) = self.selected {
-                    if ui.button("Копия").clicked() {
-                        let mut copy = self.cubes[index];
-                        copy.center[0] = (copy.center[0] + copy.size + 0.25).min(100.0);
-                        self.append(copy);
-                        self.focus();
-                    }
-                    if ui.button("Удалить").clicked() {
-                        self.remember();
-                        self.cubes.remove(index);
-                        self.selected = None;
-                    }
-                }
-                if ui
-                    .add_enabled(!self.undo.is_empty(), egui::Button::new("Отменить"))
-                    .clicked()
-                {
-                    if let Some(cubes) = self.undo.pop() {
-                        self.cubes = cubes;
-                    }
-                    self.selected = self.selected.filter(|index| *index < self.cubes.len());
-                    self.drag = None;
-                }
-            });
-            if let Some(index) = self.selected {
-                let mut cube = self.cubes[index];
                 ui.horizontal_wrapped(|ui| {
-                    ui.label("Размер");
-                    if ui.small_button("−").clicked() {
-                        cube.size = (cube.size - 0.25).max(0.2);
+                    for (mode, label) in [
+                        (Mode::Orbit, "Орбита"),
+                        (Mode::Pan, "Сдвиг"),
+                        (Mode::Move, "Двигать куб"),
+                    ] {
+                        if ui.selectable_label(self.mode == mode, label).clicked() {
+                            self.mode = mode;
+                            self.drag = None;
+                        }
                     }
-                    ui.label(format!("{:.2} м", cube.size));
-                    if ui.small_button("+").clicked() {
-                        cube.size = (cube.size + 0.25).min(20.0);
+                    if ui.button("−").clicked() {
+                        self.zoom(1.18);
                     }
-                    if ui.button("↶ 15°").clicked() {
-                        cube.angle = (cube.angle - 15.0).rem_euclid(360.0);
-                    }
-                    if ui.button("↷ 15°").clicked() {
-                        cube.angle = (cube.angle + 15.0).rem_euclid(360.0);
+                    if ui.button("+").clicked() {
+                        self.zoom(1.0 / 1.18);
                     }
                 });
-                if cube.size != self.cubes[index].size {
-                    cube.center[1] =
-                        (cube.center[1] + (cube.size - self.cubes[index].size) * 0.5).min(100.0);
+                ui.horizontal_wrapped(|ui| {
+                    for (view, label) in [
+                        (View::Orbit, "Перспектива"),
+                        (View::Top, "Сверху"),
+                        (View::Front, "Спереди"),
+                        (View::Right, "Справа"),
+                    ] {
+                        if ui.selectable_label(self.view == view, label).clicked() {
+                            self.set_view(view);
+                        }
+                    }
+                    if ui.button("В кадр").clicked() {
+                        self.focus();
+                    }
+                });
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("+ Куб").clicked() {
+                        let x = self
+                            .cubes
+                            .iter()
+                            .map(|cube| cube.center[0] + cube.size * 0.5)
+                            .fold(-1.25, f32::max);
+                        let cube = Cube {
+                            center: [(x + 1.25).min(98.0), 1.0, 0.0],
+                            size: 2.0,
+                            angle: 0.0,
+                        };
+                        self.append(cube);
+                        self.focus();
+                    }
+                    if let Some(index) = self.selected {
+                        if ui.button("Копия").clicked() {
+                            let mut copy = self.cubes[index];
+                            copy.center[0] = (copy.center[0] + copy.size + 0.25).min(100.0);
+                            self.append(copy);
+                            self.focus();
+                        }
+                        if ui.button("Удалить").clicked() {
+                            self.remember();
+                            self.cubes.remove(index);
+                            self.selected = None;
+                        }
+                    }
+                    if ui
+                        .add_enabled(!self.undo.is_empty(), egui::Button::new("Отменить"))
+                        .clicked()
+                    {
+                        if let Some(cubes) = self.undo.pop() {
+                            self.cubes = cubes;
+                        }
+                        self.selected = self.selected.filter(|index| *index < self.cubes.len());
+                        self.drag = None;
+                    }
+                });
+                if let Some(index) = self.selected {
+                    let mut cube = self.cubes[index];
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Размер");
+                        if ui.small_button("−").clicked() {
+                            cube.size = (cube.size - 0.25).max(0.2);
+                        }
+                        ui.label(format!("{:.2} м", cube.size));
+                        if ui.small_button("+").clicked() {
+                            cube.size = (cube.size + 0.25).min(20.0);
+                        }
+                        if ui.button("↶ 15°").clicked() {
+                            cube.angle = (cube.angle - 15.0).rem_euclid(360.0);
+                        }
+                        if ui.button("↷ 15°").clicked() {
+                            cube.angle = (cube.angle + 15.0).rem_euclid(360.0);
+                        }
+                    });
+                    if cube.size != self.cubes[index].size {
+                        cube.center[1] = (cube.center[1]
+                            + (cube.size - self.cubes[index].size) * 0.5)
+                            .min(100.0);
+                    }
+                    self.update(index, cube);
                 }
-                self.update(index, cube);
-            }
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("Сохранить модель").clicked() {
-                    self.message = self
-                        .save()
-                        .map(|_| "Модель сохранена".into())
-                        .unwrap_or_else(|error| error.to_string());
-                }
-                if ui.button("Открыть модель").clicked() {
-                    self.open();
-                }
-                if !self.message.is_empty() {
-                    ui.label(&self.message);
-                }
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Сохранить модель").clicked() {
+                        self.message = self
+                            .save()
+                            .map(|_| "Модель сохранена".into())
+                            .unwrap_or_else(|error| error.to_string());
+                    }
+                    if ui.button("Открыть модель").clicked() {
+                        self.open();
+                    }
+                    if !self.message.is_empty() {
+                        ui.label(&self.message);
+                    }
+                });
             });
-        });
         egui::CentralPanel::default()
             .frame(Frame::none())
             .show(ctx, |ui| {

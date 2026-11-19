@@ -1,9 +1,11 @@
 <resources>
-    <style name="HomePlannerTheme" parent="android:style/Theme.Material.NoActionBar">
-        <item name="android:colorAccent">#7BE5C9</item>
-        <item name="android:windowBackground">#13212A</item>
-        <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
+    <style name="HomePlannerTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:colorAccent">#087BB5</item>
+        <item name="android:windowBackground">#EDF6FC</item>
+        <item name="android:statusBarColor">#EDF6FC</item>
+        <item name="android:navigationBarColor">#EDF6FC</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
     </style>
     <style name="HomePlannerEditorTheme" parent="HomePlannerTheme">
         <item name="android:windowFullscreen">true</item>

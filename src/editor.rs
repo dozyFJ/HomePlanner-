@@ -12,15 +12,17 @@ use crate::furnishings::FurnishingAtlas;
 use crate::modeling::Modeling;
 use crate::plan::{FloorFinish, Furniture, FurnitureKind, OpeningKind, Plan, SHEET};
 use crate::scan::Photo;
+use crate::sheet_edit::{HouseSelection, pencil_vertices};
 
-const PAPER: Color32 = Color32::from_rgb(246, 244, 235);
-const INK: Color32 = Color32::from_rgb(39, 54, 59);
-const ACCENT: Color32 = Color32::from_rgb(11, 117, 112);
+use crate::theme::{self, ACCENT, INK, SHEET as PAPER};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tool {
     Room,
     Wall,
+    Pencil,
+    Pan,
+    House,
     Door,
     Window,
     Garage,
@@ -41,6 +43,9 @@ impl Tool {
         match self {
             Self::Room => "Комната",
             Self::Wall => "Стена",
+            Self::Pencil => "Карандаш",
+            Self::Pan => "Холст",
+            Self::House => "Дом",
             Self::Door => "Дверь",
             Self::Window => "Окно",
             Self::Garage => "Ворота",
@@ -130,6 +135,12 @@ pub struct Editor {
     furniture_selection: Option<usize>,
     furniture_drag: Option<FurnitureDrag>,
     portrait_sheet: Option<bool>,
+    sheet_zoom: f32,
+    sheet_pan: egui::Vec2,
+    sheet_multitouch: bool,
+    house_selection: Option<HouseSelection>,
+    house_move: Option<(Vec2, Vec2)>,
+    pencil: Vec<Vec2>,
     rotated: bool,
     undo: Vec<Plan>,
     path: String,
@@ -163,6 +174,12 @@ impl Default for Editor {
             furniture_selection: None,
             furniture_drag: None,
             portrait_sheet: None,
+            sheet_zoom: 1.0,
+            sheet_pan: egui::Vec2::ZERO,
+            sheet_multitouch: false,
+            house_selection: None,
+            house_move: None,
+            pencil: Vec::new(),
             rotated: false,
             undo: vec![],
             path: "house.json".into(),
@@ -256,6 +273,8 @@ impl Editor {
         self.start = None;
         self.delayed_tap = None;
         self.wall_drag_end = None;
+        self.pencil.clear();
+        self.house_move = None;
     }
 
     fn clear_selection(&mut self) {
@@ -263,6 +282,8 @@ impl Editor {
         self.room_edit = None;
         self.furniture_selection = None;
         self.furniture_drag = None;
+        self.house_selection = None;
+        self.house_move = None;
     }
 
     fn move_furniture(&mut self, index: usize, item: Furniture) {
@@ -466,92 +487,101 @@ impl Editor {
         }
         self.refresh_photo(ctx);
         let mobile = cfg!(target_os = "android");
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            if mobile {
-                ui.spacing_mut().interact_size.y = 36.0;
-            }
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                let title = if mobile {
-                    "Home Planner"
-                } else {
-                    "WolfCraft Home Planner"
-                };
-                ui.heading(RichText::new(title).strong());
-                ui.separator();
-                if ui
-                    .selectable_label(!self.preview && !self.modeling_open, "Лист · 2D")
-                    .clicked()
-                {
-                    self.preview = false;
-                    self.modeling_open = false;
+        egui::TopBottomPanel::top("toolbar")
+            .frame(theme::toolbar())
+            .show(ctx, |ui| {
+                if mobile {
+                    ui.spacing_mut().interact_size.y = 36.0;
                 }
-                if ui.selectable_label(self.preview, "Дом · 3D").clicked() {
-                    self.modeling_open = false;
-                    self.flush_tap();
-                    self.cancel_mark();
-                    self.shape_at = None;
-                    self.clear_selection();
-                    self.message.clear();
-                    self.preview = true;
-                }
-                if ui
-                    .selectable_label(self.modeling_open, "Моделирование · 3D")
-                    .clicked()
-                {
-                    self.flush_tap();
-                    self.cancel_mark();
-                    self.clear_selection();
-                    self.shape_at = None;
-                    self.preview = false;
-                    self.modeling_open = true;
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                if !self.preview && !self.modeling_open {
-                    let current = self.portrait_sheet.unwrap_or(mobile);
-                    let portrait = ui.selectable_label(current, "Портрет").clicked();
-                    let landscape = ui.selectable_label(!current, "Альбом").clicked();
-                    if portrait || landscape {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    let title = if mobile {
+                        "Home Planner"
+                    } else {
+                        "WolfCraft Home Planner"
+                    };
+                    ui.heading(RichText::new(title).strong().color(ACCENT));
+                    ui.separator();
+                    if ui
+                        .selectable_label(!self.preview && !self.modeling_open, "Лист · 2D")
+                        .clicked()
+                    {
+                        self.preview = false;
+                        self.modeling_open = false;
+                    }
+                    if ui.selectable_label(self.preview, "Дом · 3D").clicked() {
+                        self.modeling_open = false;
                         self.flush_tap();
                         self.cancel_mark();
-                        self.portrait_sheet = Some(portrait);
+                        self.shape_at = None;
+                        self.clear_selection();
+                        self.message.clear();
+                        self.preview = true;
                     }
-                }
-                if self.open_updates.is_some() && ui.button("Обновления").clicked() {
-                    self.flush_tap();
-                    let saved = if self.modeling_open {
-                        self.modeling.save()
-                    } else {
-                        self.save()
-                    };
-                    if let Err(error) = saved {
-                        self.message = format!("Не удалось сохранить проект: {error}");
-                    } else if let Some(open) = &self.open_updates {
-                        if open().is_err() {
-                            self.message = "Не удалось открыть обновления".into();
+                    if ui
+                        .selectable_label(self.modeling_open, "Моделирование · 3D")
+                        .clicked()
+                    {
+                        self.flush_tap();
+                        self.cancel_mark();
+                        self.clear_selection();
+                        self.shape_at = None;
+                        self.preview = false;
+                        self.modeling_open = true;
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    if !self.preview && !self.modeling_open {
+                        let current = self.portrait_sheet.unwrap_or(mobile);
+                        let portrait = ui.selectable_label(current, "Портрет").clicked();
+                        let landscape = ui.selectable_label(!current, "Альбом").clicked();
+                        if portrait || landscape {
+                            self.flush_tap();
+                            self.cancel_mark();
+                            if portrait != current {
+                                self.sheet_zoom = 1.0;
+                                self.sheet_pan = egui::Vec2::ZERO;
+                            }
+                            self.portrait_sheet = Some(portrait);
                         }
                     }
+                    if self.open_updates.is_some() && ui.button("Обновления").clicked() {
+                        self.flush_tap();
+                        let saved = if self.modeling_open {
+                            self.modeling.save()
+                        } else {
+                            self.save()
+                        };
+                        if let Err(error) = saved {
+                            self.message = format!("Не удалось сохранить проект: {error}");
+                        } else if let Some(open) = &self.open_updates {
+                            if open().is_err() {
+                                self.message = "Не удалось открыть обновления".into();
+                            }
+                        }
+                    }
+                });
+                if !self.preview && !self.modeling_open {
+                    self.scan_tools(ui);
                 }
+                if (self.preview || self.modeling_open) && !self.message.is_empty() {
+                    ui.label(&self.message);
+                }
+                ui.add_space(4.0);
             });
-            if !self.preview && !self.modeling_open {
-                self.scan_tools(ui);
-            }
-            if (self.preview || self.modeling_open) && !self.message.is_empty() {
-                ui.label(&self.message);
-            }
-            ui.add_space(4.0);
-        });
         if self.modeling_open {
             self.modeling.ui(ctx, mobile);
             return;
         }
         if !self.preview {
             if mobile {
-                egui::TopBottomPanel::bottom("tools").show(ctx, |ui| self.tools(ui, true));
+                egui::TopBottomPanel::bottom("tools")
+                    .frame(theme::toolbar())
+                    .show(ctx, |ui| self.tools(ui, true));
             } else {
                 egui::SidePanel::left("tools")
                     .exact_width(180.0)
+                    .frame(theme::toolbar())
                     .show(ctx, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| self.tools(ui, false));
                     });
@@ -562,6 +592,11 @@ impl Editor {
                     Tool::Room if self.start.is_some() => "Укажите вторую точку.",
                     Tool::Room => "Укажите два противоположных угла комнаты.",
                     Tool::Wall => "Укажите начало стены или потяните от первой точки.",
+                    Tool::Pencil => "Проведите пальцем, чтобы начертить цепочку стен.",
+                    Tool::Pan => {
+                        "Ведите пальцем для сдвига. Сведите или разведите два пальца для масштаба."
+                    }
+                    Tool::House => "Коснитесь дома и перетащите его в новое место.",
                     Tool::Door | Tool::Window | Tool::Garage => {
                         "Перетащите инструмент на стену или коснитесь стены."
                     }
@@ -580,23 +615,25 @@ impl Editor {
             self.wall_editor(ctx);
             self.room_editor(ctx);
         } else {
-            egui::TopBottomPanel::bottom("camera").show(ctx, |ui| {
-                if mobile {
-                    ui.spacing_mut().interact_size.y = 38.0;
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("−").clicked() {
-                        self.distance = (self.distance * 1.16).min(95.0);
+            egui::TopBottomPanel::bottom("camera")
+                .frame(theme::toolbar())
+                .show(ctx, |ui| {
+                    if mobile {
+                        ui.spacing_mut().interact_size.y = 38.0;
                     }
-                    if ui.button("+").clicked() {
-                        self.distance = (self.distance / 1.16).max(5.0);
-                    }
-                    if !cfg!(target_os = "android") {
-                        ui.label("Перетаскивание — поворот · Колесо — масштаб");
-                    }
-                    ui.checkbox(&mut self.cutaway, "Срез стен");
+                    ui.horizontal(|ui| {
+                        if ui.button("−").clicked() {
+                            self.distance = (self.distance * 1.16).min(95.0);
+                        }
+                        if ui.button("+").clicked() {
+                            self.distance = (self.distance / 1.16).max(5.0);
+                        }
+                        if !cfg!(target_os = "android") {
+                            ui.label("Перетаскивание — поворот · Колесо — масштаб");
+                        }
+                        ui.checkbox(&mut self.cutaway, "Срез стен");
+                    });
                 });
-            });
             egui::CentralPanel::default()
                 .frame(Frame::none())
                 .show(ctx, |ui| {
@@ -618,6 +655,9 @@ impl Editor {
         let tools = [
             Tool::Room,
             Tool::Wall,
+            Tool::Pencil,
+            Tool::House,
+            Tool::Pan,
             Tool::Door,
             Tool::Window,
             Tool::Garage,
@@ -659,7 +699,20 @@ impl Editor {
             ui.heading("Инструменты");
             tool_buttons(ui);
         }
-        if self.tool == Tool::Edit && self.furniture_selection.is_some() {
+        if self.tool == Tool::Pan {
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("−").clicked() {
+                    self.sheet_zoom = (self.sheet_zoom / 1.25).max(0.75);
+                }
+                if ui.button("+").clicked() {
+                    self.sheet_zoom = (self.sheet_zoom * 1.25).min(5.0);
+                }
+                if ui.button("Вписать лист").clicked() {
+                    self.sheet_pan = egui::Vec2::ZERO;
+                    self.sheet_zoom = 1.0;
+                }
+            });
+        } else if self.tool == Tool::Edit && self.furniture_selection.is_some() {
             self.furniture_actions(ui);
         } else {
             ui.checkbox(&mut self.rotated, "Повернуть мебель");
@@ -785,24 +838,59 @@ impl Editor {
     }
 
     fn sheet(&mut self, ui: &mut egui::Ui, mobile: bool, atlas: &FurnishingAtlas) {
-        let space = ui
-            .available_rect_before_wrap()
-            .shrink(if mobile { 4.0 } else { 22.0 });
+        let (viewport, response) =
+            ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        let space = viewport.shrink(if mobile { 4.0 } else { 22.0 });
         let portrait = self.portrait_sheet.unwrap_or(mobile);
         let dimensions = if portrait {
             Vec2::new(SHEET.y, SHEET.x)
         } else {
             SHEET
         };
-        let scale = (space.width() / dimensions.x)
+        let base_scale = (space.width() / dimensions.x)
             .min(space.height() / dimensions.y)
             .max(1.0);
-        let rect = Rect::from_center_size(
-            space.center(),
-            vec2(dimensions.x * scale, dimensions.y * scale),
-        );
-        let response = ui.allocate_rect(rect, Sense::click_and_drag());
-        let painter = ui.painter().with_clip_rect(rect);
+        let (pinch, down, scroll) = ui.input(|input| {
+            (
+                input
+                    .multi_touch()
+                    .filter(|touch| viewport.contains(touch.start_pos)),
+                input.pointer.any_down(),
+                input.smooth_scroll_delta.y,
+            )
+        });
+        if let Some(pinch) = pinch {
+            self.sheet_multitouch = true;
+            self.cancel_mark();
+            self.furniture_drag = None;
+            egui::DragAndDrop::clear_payload(ui.ctx());
+            let zoom = (self.sheet_zoom * pinch.zoom_delta).clamp(0.75, 5.0);
+            let anchor = pinch.start_pos - space.center() - self.sheet_pan;
+            self.sheet_pan += pinch.translation_delta + anchor * (1.0 - zoom / self.sheet_zoom);
+            self.sheet_zoom = zoom;
+        } else if !self.sheet_multitouch {
+            if self.tool == Tool::Pan && response.dragged() {
+                self.sheet_pan += response.drag_delta();
+            }
+            if response.hovered() && scroll != 0.0 {
+                let zoom = (self.sheet_zoom * (scroll * 0.002).exp()).clamp(0.75, 5.0);
+                if let Some(point) = response.hover_pos() {
+                    self.sheet_pan +=
+                        (point - space.center() - self.sheet_pan) * (1.0 - zoom / self.sheet_zoom);
+                }
+                self.sheet_zoom = zoom;
+            }
+        }
+        let block_editing = self.sheet_multitouch || self.tool == Tool::Pan;
+        if !down && pinch.is_none() {
+            self.sheet_multitouch = false;
+        }
+        let scale = base_scale * self.sheet_zoom;
+        let size = vec2(dimensions.x * scale, dimensions.y * scale);
+        let pan_limit = size * 0.5 + viewport.size() * 0.40;
+        self.sheet_pan = self.sheet_pan.clamp(-pan_limit, pan_limit);
+        let rect = Rect::from_center_size(space.center() + self.sheet_pan, size);
+        let painter = ui.painter().with_clip_rect(viewport.intersect(rect));
         let screen = |p: Vec2| {
             let p = if portrait {
                 Vec2::new(SHEET.y - p.y, p.x)
@@ -821,6 +909,7 @@ impl Editor {
             p.clamp(Vec2::ZERO, SHEET)
         };
         painter.rect_filled(rect, 0.0, PAPER);
+        painter.rect_stroke(rect, 0.0, Stroke::new(1.0_f32, theme::BORDER));
         if self.photo_visible
             && let Some(photo) = &self.photo
         {
@@ -842,7 +931,7 @@ impl Editor {
             let stroke: f32 = if x % 2 == 0 { 0.8 } else { 0.4 };
             painter.line_segment(
                 [screen(Vec2::new(x_m, 0.0)), screen(Vec2::new(x_m, SHEET.y))],
-                Stroke::new(stroke, Color32::from_gray(208)),
+                Stroke::new(stroke, theme::BORDER),
             );
         }
         for y in 0..=(SHEET.y * 2.0) as usize {
@@ -850,12 +939,18 @@ impl Editor {
             let stroke: f32 = if y % 2 == 0 { 0.8 } else { 0.4 };
             painter.line_segment(
                 [screen(Vec2::new(0.0, y_m)), screen(Vec2::new(SHEET.x, y_m))],
-                Stroke::new(stroke, Color32::from_gray(208)),
+                Stroke::new(stroke, theme::BORDER),
             );
         }
+        let house_delta = self.house_move.map_or(Vec2::ZERO, |(_, delta)| delta);
         for (index, room) in self.plan.rooms.iter().enumerate() {
-            let a = Vec2::from_array(room.min);
-            let b = Vec2::from_array(room.max);
+            let selected = self
+                .house_selection
+                .as_ref()
+                .is_some_and(|house| house.rooms.get(index) == Some(&true));
+            let shift = if selected { house_delta } else { Vec2::ZERO };
+            let a = Vec2::from_array(room.min) + shift;
+            let b = Vec2::from_array(room.max) + shift;
             let room_rect = Rect::from_two_pos(screen(a), screen(b));
             painter.rect_filled(
                 room_rect,
@@ -879,10 +974,17 @@ impl Editor {
         for (index, wall) in self.plan.walls.iter().enumerate() {
             let wall_stroke = (wall.thickness * scale).max(2.0);
             let (a, b) = wall.points();
-            let selected = self
-                .wall_edit
+            let in_house = self
+                .house_selection
                 .as_ref()
-                .is_some_and(|edit| edit.index == index);
+                .is_some_and(|house| house.walls.get(index) == Some(&true));
+            let shift = if in_house { house_delta } else { Vec2::ZERO };
+            let (a, b) = (a + shift, b + shift);
+            let selected = in_house
+                || self
+                    .wall_edit
+                    .as_ref()
+                    .is_some_and(|edit| edit.index == index);
             painter.line_segment(
                 [screen(a), screen(b)],
                 Stroke::new(wall_stroke, if selected { ACCENT } else { INK }),
@@ -927,7 +1029,12 @@ impl Editor {
                 Vec2::new(x, z),
                 Vec2::new(-x, z),
             ];
-            let corners = corners.map(|corner| screen(item.point(corner)));
+            let in_house = self
+                .house_selection
+                .as_ref()
+                .is_some_and(|house| house.furniture.get(index) == Some(&true));
+            let shift = if in_house { house_delta } else { Vec2::ZERO };
+            let corners = corners.map(|corner| screen(item.point(corner) + shift));
             atlas.paint(&painter, item.kind, corners);
             if self.furniture_selection == Some(index) || drag.is_some() {
                 painter.add(egui::Shape::closed_line(
@@ -936,13 +1043,28 @@ impl Editor {
                 ));
             }
         }
-        if let Some(kind) = egui::DragAndDrop::payload::<OpeningKind>(ui.ctx()) {
+        if let Some(house) = &self.house_selection {
+            let selection = Rect::from_two_pos(
+                screen(house.min + house_delta),
+                screen(house.max + house_delta),
+            );
+            painter.rect_stroke(selection.expand(4.0), 4.0, Stroke::new(1.5_f32, ACCENT));
+        }
+        if self.pencil.len() > 1 {
+            painter.add(egui::Shape::line(
+                self.pencil.iter().copied().map(screen).collect(),
+                Stroke::new(2.2_f32, ACCENT),
+            ));
+        }
+        if block_editing {
+            // A multi-touch or pan gesture must not commit any edit underneath it.
+        } else if let Some(kind) = egui::DragAndDrop::payload::<OpeningKind>(ui.ctx()) {
             let (point, released) = ui.input(|input| {
                 (
                     input
                         .pointer
                         .interact_pos()
-                        .filter(|point| rect.contains(*point)),
+                        .filter(|point| viewport.intersect(rect).contains(*point)),
                     input.pointer.button_released(egui::PointerButton::Primary),
                 )
             });
@@ -974,12 +1096,102 @@ impl Editor {
             }
         } else if self.shape_at.is_none() && self.wall_edit.is_none() && self.room_edit.is_none() {
             let pointer = response.interact_pointer_pos().map(position);
-            if response.double_clicked() {
+            let on_sheet = response
+                .interact_pointer_pos()
+                .is_some_and(|point| rect.contains(point));
+            if self.tool == Tool::House {
+                if response.clicked() {
+                    self.house_selection = if on_sheet {
+                        pointer.and_then(|point| HouseSelection::at(&self.plan, point))
+                    } else {
+                        None
+                    };
+                } else if response.drag_started() {
+                    let start = ui
+                        .input(|i| i.pointer.press_origin())
+                        .filter(|point| rect.contains(*point))
+                        .map(position);
+                    if let Some(start) = start {
+                        self.house_selection = HouseSelection::at(&self.plan, start);
+                        if let (Some(house), Some(end)) = (&self.house_selection, pointer) {
+                            self.house_move =
+                                Some((start, house.clamp_delta(snap_point(end - start))));
+                        }
+                    }
+                } else if response.dragged() {
+                    if let (Some((start, _)), Some(house), Some(end)) =
+                        (self.house_move, &self.house_selection, pointer)
+                    {
+                        self.house_move = Some((start, house.clamp_delta(snap_point(end - start))));
+                        ui.ctx().request_repaint();
+                    }
+                } else if response.drag_stopped() {
+                    if let (Some((start, delta)), Some(house)) =
+                        (self.house_move.take(), &mut self.house_selection)
+                    {
+                        let delta =
+                            pointer.map_or(delta, |end| house.clamp_delta(snap_point(end - start)));
+                        if delta != Vec2::ZERO {
+                            let previous = self.plan.clone();
+                            house.translate(&mut self.plan, delta);
+                            self.remember(previous);
+                            self.message.clear();
+                        }
+                    }
+                }
+            } else if self.tool == Tool::Pencil {
+                if response.drag_started() {
+                    self.pencil.clear();
+                    if let Some(start) = ui
+                        .input(|i| i.pointer.press_origin())
+                        .filter(|point| rect.contains(*point))
+                        .map(position)
+                    {
+                        self.pencil.push(start);
+                    }
+                }
+                if response.dragged()
+                    && let Some(point) = pointer
+                    && self
+                        .pencil
+                        .last()
+                        .is_some_and(|last| last.distance(point) >= 0.08)
+                {
+                    if self.pencil.len() < 2048 {
+                        self.pencil.push(point);
+                    }
+                    ui.ctx().request_repaint();
+                }
+                if response.drag_stopped() && !self.pencil.is_empty() {
+                    if let Some(point) = pointer {
+                        self.pencil.push(point);
+                    }
+                    let points = pencil_vertices(&self.pencil);
+                    self.pencil.clear();
+                    if points.len() > 1 {
+                        let previous = self.plan.clone();
+                        let mut added = false;
+                        for pair in points.windows(2) {
+                            if self.plan.walls.len() >= 2000 {
+                                break;
+                            }
+                            added |= self.plan.wall(pair[0], pair[1]);
+                        }
+                        if added {
+                            self.remember(previous);
+                            self.message.clear();
+                        }
+                    }
+                }
+            } else if response.double_clicked() && on_sheet {
                 self.cancel_mark();
                 self.shape_at = pointer.map(snap_point);
             } else if self.tool == Tool::Edit && response.drag_started() {
                 self.delayed_tap = None;
-                let start = ui.input(|i| i.pointer.press_origin()).map(position);
+                let start = ui
+                    .input(|i| i.pointer.press_origin())
+                    .filter(|point| rect.contains(*point))
+                    .map(position);
                 if let Some((index, start)) =
                     start.and_then(|p| self.plan.furniture_at(p).map(|i| (i, p)))
                 {
@@ -1009,6 +1221,7 @@ impl Editor {
                 if self.start.is_none() {
                     self.start = ui
                         .input(|i| i.pointer.press_origin())
+                        .filter(|point| rect.contains(*point))
                         .map(position)
                         .map(snap_point);
                 }
@@ -1023,7 +1236,7 @@ impl Editor {
                         self.apply(end);
                     }
                 }
-            } else if response.clicked() {
+            } else if response.clicked() && on_sheet {
                 if let Some(point) = pointer {
                     self.flush_tap();
                     self.delayed_tap = Some((point, Instant::now() + Duration::from_millis(320)));
@@ -1117,6 +1330,7 @@ impl Editor {
                 }
                 return;
             }
+            Tool::Pencil | Tool::Pan | Tool::House => return,
             Tool::Erase => self.plan.erase(point),
             tool => {
                 let kind = match tool {
@@ -1225,6 +1439,82 @@ mod tests {
         assert_eq!(editor.plan.furniture[0].bounds().0, Vec2::ZERO);
         assert_eq!(editor.undo.len(), 1);
         assert_eq!(editor.undo[0].furniture[0].at, item.at);
+    }
+
+    #[test]
+    fn pinching_the_sheet_zooms_without_drawing_walls() {
+        let ctx = egui::Context::default();
+        let atlas = FurnishingAtlas::build().unwrap();
+        let atlas = FurnishingAtlas::upload(&ctx, &atlas);
+        let mut editor = Editor {
+            tool: Tool::Pencil,
+            ..Default::default()
+        };
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 700.0));
+        let frame = |editor: &mut Editor, events: Vec<egui::Event>| {
+            ctx.run(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| editor.ui(ctx, &atlas),
+            )
+        };
+        let layout = frame(&mut editor, vec![]);
+        let center = layout
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.fill == PAPER => Some(rect.rect.center()),
+                _ => None,
+            })
+            .expect("planning sheet is visible");
+        let a = center - vec2(20.0, 0.0);
+        let b = center + vec2(20.0, 0.0);
+        let touch = |id, phase, pos| egui::Event::Touch {
+            device_id: egui::TouchDeviceId(1),
+            id: egui::TouchId(id),
+            phase,
+            pos,
+            force: None,
+        };
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            pressed,
+            button: egui::PointerButton::Primary,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(
+            &mut editor,
+            vec![
+                touch(1, egui::TouchPhase::Start, a),
+                egui::Event::PointerMoved(a),
+                button(a, true),
+            ],
+        );
+        frame(&mut editor, vec![touch(2, egui::TouchPhase::Start, b)]);
+        let moved_a = a - vec2(12.0, 0.0);
+        let moved_b = b + vec2(12.0, 0.0);
+        frame(
+            &mut editor,
+            vec![
+                touch(1, egui::TouchPhase::Move, moved_a),
+                touch(2, egui::TouchPhase::Move, moved_b),
+                egui::Event::PointerMoved(moved_a),
+            ],
+        );
+        frame(&mut editor, vec![touch(2, egui::TouchPhase::End, moved_b)]);
+        frame(
+            &mut editor,
+            vec![
+                touch(1, egui::TouchPhase::End, moved_a),
+                button(moved_a, false),
+                egui::Event::PointerGone,
+            ],
+        );
+        assert!(editor.sheet_zoom > 1.0);
+        assert!(editor.plan.walls.is_empty());
     }
 
     #[test]

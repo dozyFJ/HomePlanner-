@@ -14,4 +14,5 @@
     <string name="install_permission">Разрешите установку из Home Planner в настройках Android и снова нажмите «Установить».</string>
     <string name="no_vulkan">Для 3D требуется поддержка Vulkan.</string>
     <string name="return_to_editor">Вернуться к проекту</string>
+    <string name="update_title">Обновления Home Planner</string>
 </resources>
