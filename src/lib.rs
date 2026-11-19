@@ -234,7 +234,20 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
         return;
     };
     let log = data.join("planner.log");
-    let editor = Editor::for_android(data.join("house.json"));
+    let activity = app.clone();
+    let mut editor = Editor::for_android(data.join("house.json"));
+    editor.open_updates = Some(Box::new(move || {
+        use jni::{JavaVM, jni_sig, jni_str, objects::JObject, refs::Global};
+        // The cloned AndroidApp keeps the Activity global reference alive during this call.
+        let vm = unsafe { JavaVM::from_raw(activity.vm_as_ptr().cast()) };
+        let raw = activity.activity_as_ptr() as jni::sys::jobject;
+        vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+            let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw)? };
+            env.call_method(activity, jni_str!("showUpdates"), jni_sig!("()V"), &[])?;
+            Ok(())
+        })
+        .map_err(|error| error.to_string())
+    }));
     let result = EventLoop::builder()
         .with_android_app(app)
         .build()

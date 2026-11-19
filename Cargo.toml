@@ -20,6 +20,7 @@ wolfcraft-ui = { git = "https://github.com/dozyFJ/WolfCraft.git", rev = "80ca806
 
 
 [target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22.4"
 winit = { version = "0.30.13", features = ["android-native-activity"] }
 
 [profile.release]

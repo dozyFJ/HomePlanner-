@@ -1,7 +1,6 @@
 package dev.dozyfj.homeplanner;
 
 import android.app.Activity;
-import android.app.NativeActivity;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
@@ -21,6 +20,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public final class LauncherActivity extends Activity {
+    static final String ONLY_UPDATES = "dev.dozyfj.homeplanner.ONLY_UPDATES";
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private UpdateClient client;
     private UpdateClient.Update available;
@@ -52,11 +52,17 @@ public final class LauncherActivity extends Activity {
         version.setPadding(0, 0, 0, padding);
         column.addView(version);
 
-        Button editor = new Button(this);
-        editor.setText(R.string.open_editor);
-        editor.setOnClickListener(view -> startActivity(new Intent(this, NativeActivity.class)));
+        boolean onlyUpdates = getIntent().getBooleanExtra(ONLY_UPDATES, false);
         boolean vulkan = getPackageManager().hasSystemFeature(PackageManager.FEATURE_VULKAN_HARDWARE_VERSION);
-        editor.setEnabled(vulkan);
+        Button editor = new Button(this);
+        if (onlyUpdates) {
+            editor.setText(R.string.return_to_editor);
+            editor.setOnClickListener(view -> finish());
+        } else {
+            editor.setText(R.string.open_editor);
+            editor.setOnClickListener(view -> startActivity(new Intent(this, PlannerActivity.class)));
+            editor.setEnabled(vulkan);
+        }
         column.addView(editor);
 
         updates = new Button(this);
@@ -68,13 +74,13 @@ public final class LauncherActivity extends Activity {
         status.setPadding(0, padding, 0, 0);
         column.addView(status);
 
-        if (!vulkan) {
+        if (!vulkan && !onlyUpdates) {
             TextView warning = new TextView(this);
             warning.setText(R.string.no_vulkan);
             warning.setGravity(Gravity.CENTER);
             column.addView(warning);
         }
-        check(false);
+        check(onlyUpdates);
     }
 
     private void updateAction() {

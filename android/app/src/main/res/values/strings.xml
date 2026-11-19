@@ -13,4 +13,5 @@
     <string name="update_error">Не удалось проверить, скачать или открыть обновление</string>
     <string name="install_permission">Разрешите установку из Home Planner в настройках Android и снова нажмите «Установить».</string>
     <string name="no_vulkan">Для 3D требуется поддержка Vulkan.</string>
+    <string name="return_to_editor">Вернуться к проекту</string>
 </resources>

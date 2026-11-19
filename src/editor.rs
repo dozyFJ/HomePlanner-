@@ -21,6 +21,8 @@ enum Tool {
     Wall,
     Door,
     Window,
+    Garage,
+    Edit,
     Bed,
     Table,
     Sofa,
@@ -36,12 +38,23 @@ impl Tool {
             Self::Wall => "Стена",
             Self::Door => "Дверь",
             Self::Window => "Окно",
+            Self::Garage => "Ворота",
+            Self::Edit => "Правка",
             Self::Bed => "Кровать",
             Self::Table => "Стол",
             Self::Sofa => "Диван",
             Self::Cabinet => "Шкаф",
             Self::Lamp => "Торшер",
             Self::Erase => "Ластик",
+        }
+    }
+
+    fn opening(self) -> Option<OpeningKind> {
+        match self {
+            Self::Door => Some(OpeningKind::Door),
+            Self::Window => Some(OpeningKind::Window),
+            Self::Garage => Some(OpeningKind::Garage),
+            _ => None,
         }
     }
 }
@@ -75,7 +88,14 @@ impl HouseShape {
     }
 }
 
+struct WallEdit {
+    index: usize,
+    length: f32,
+    thickness: f32,
+}
+
 pub struct Editor {
+    pub open_updates: Option<Box<dyn Fn() -> Result<(), String>>>,
     pub plan: Plan,
     pub preview: bool,
     pub cutaway: bool,
@@ -84,6 +104,8 @@ pub struct Editor {
     delayed_tap: Option<(Vec2, Instant)>,
     wall_drag_end: Option<Vec2>,
     shape_at: Option<Vec2>,
+    wall_edit: Option<WallEdit>,
+    portrait_sheet: Option<bool>,
     rotated: bool,
     undo: Vec<Plan>,
     path: String,
@@ -97,6 +119,7 @@ impl Default for Editor {
     fn default() -> Self {
         Self {
             plan: Plan::default(),
+            open_updates: None,
             preview: false,
             cutaway: false,
             tool: Tool::Room,
@@ -104,6 +127,8 @@ impl Default for Editor {
             delayed_tap: None,
             wall_drag_end: None,
             shape_at: None,
+            wall_edit: None,
+            portrait_sheet: None,
             rotated: false,
             undo: vec![],
             path: "house.json".into(),
@@ -226,6 +251,21 @@ impl Editor {
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.cancel_mark();
             self.shape_at = None;
+            self.wall_edit = None;
+        }
+        if ctx.input(|i| {
+            i.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Touch {
+                        phase: egui::TouchPhase::Cancel,
+                        ..
+                    }
+                )
+            })
+        }) {
+            egui::DragAndDrop::clear_payload(ctx);
+            self.cancel_mark();
         }
         let mobile = cfg!(target_os = "android");
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -233,7 +273,7 @@ impl Editor {
                 ui.spacing_mut().interact_size.y = 36.0;
             }
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let title = if mobile {
                     "Home Planner"
                 } else {
@@ -248,9 +288,36 @@ impl Editor {
                     self.flush_tap();
                     self.cancel_mark();
                     self.shape_at = None;
+                    self.wall_edit = None;
+                    self.message.clear();
                     self.preview = true;
                 }
             });
+            ui.horizontal_wrapped(|ui| {
+                if !self.preview {
+                    let current = self.portrait_sheet.unwrap_or(mobile);
+                    let portrait = ui.selectable_label(current, "Портрет").clicked();
+                    let landscape = ui.selectable_label(!current, "Альбом").clicked();
+                    if portrait || landscape {
+                        self.flush_tap();
+                        self.cancel_mark();
+                        self.portrait_sheet = Some(portrait);
+                    }
+                }
+                if self.open_updates.is_some() && ui.button("Обновления").clicked() {
+                    self.flush_tap();
+                    if let Err(error) = self.save() {
+                        self.message = format!("Не удалось сохранить проект: {error}");
+                    } else if let Some(open) = &self.open_updates {
+                        if open().is_err() {
+                            self.message = "Не удалось открыть обновления".into();
+                        }
+                    }
+                }
+            });
+            if self.preview && !self.message.is_empty() {
+                ui.label(&self.message);
+            }
             ui.add_space(4.0);
         });
         if !self.preview {
@@ -269,7 +336,10 @@ impl Editor {
                     Tool::Room if self.start.is_some() => "Укажите вторую точку.",
                     Tool::Room => "Укажите два противоположных угла комнаты.",
                     Tool::Wall => "Укажите начало стены или потяните от первой точки.",
-                    Tool::Door | Tool::Window => "Щёлкните по стене, чтобы установить проём.",
+                    Tool::Door | Tool::Window | Tool::Garage => {
+                        "Перетащите инструмент на стену или коснитесь стены."
+                    }
+                    Tool::Edit => "Коснитесь стены, чтобы изменить длину и толщину.",
                     Tool::Erase => "Щёлкните по элементу, который хотите удалить.",
                     _ => "Щёлкните по листу, чтобы поставить мебель.",
                 };
@@ -281,6 +351,7 @@ impl Editor {
             });
             egui::CentralPanel::default().show(ctx, |ui| self.sheet(ui, mobile, atlas));
             self.shape_menu(ctx);
+            self.wall_editor(ctx);
         } else {
             egui::TopBottomPanel::bottom("camera").show(ctx, |ui| {
                 if mobile {
@@ -322,6 +393,8 @@ impl Editor {
             Tool::Wall,
             Tool::Door,
             Tool::Window,
+            Tool::Garage,
+            Tool::Edit,
             Tool::Bed,
             Tool::Table,
             Tool::Sofa,
@@ -331,12 +404,19 @@ impl Editor {
         ];
         let mut tool_buttons = |ui: &mut egui::Ui| {
             for tool in tools {
-                if ui
-                    .selectable_label(self.tool == tool, tool.name())
-                    .clicked()
-                {
+                let opening = tool.opening();
+                let mut button = egui::Button::new(tool.name()).selected(self.tool == tool);
+                if opening.is_some() {
+                    button = button.sense(Sense::click_and_drag());
+                }
+                let response = ui.add(button);
+                if let Some(opening) = opening {
+                    response.dnd_set_drag_payload(opening);
+                }
+                if response.clicked() || response.drag_started() {
                     self.flush_tap();
                     self.cancel_mark();
+                    self.wall_edit = None;
                     self.tool = tool;
                     self.message.clear();
                 }
@@ -365,6 +445,7 @@ impl Editor {
                     }
                 }
                 self.cancel_mark();
+                self.wall_edit = None;
                 self.message.clear();
             }
             if ui
@@ -376,10 +457,12 @@ impl Editor {
                 .clicked()
             {
                 self.cancel_mark();
+                self.wall_edit = None;
                 self.load_example();
             }
             if ui.button("Формы").clicked() {
                 self.cancel_mark();
+                self.wall_edit = None;
                 self.shape_at = Some(SHEET * 0.5);
             }
         });
@@ -397,6 +480,7 @@ impl Editor {
             }
             if ui.button("Открыть").clicked() {
                 self.cancel_mark();
+                self.wall_edit = None;
                 self.message = self
                     .open()
                     .map(|_| "Проект открыт".into())
@@ -405,11 +489,72 @@ impl Editor {
         });
     }
 
+    fn wall_editor(&mut self, ctx: &egui::Context) {
+        let Some(edit) = &mut self.wall_edit else {
+            return;
+        };
+        let mut open = true;
+        let mut apply = false;
+        egui::Window::new("Редактирование стены")
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .resizable(false)
+            .collapsible(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Длина");
+                    if ui.button("−").clicked() {
+                        edit.length = (edit.length - 0.25).max(0.24);
+                    }
+                    ui.add(
+                        egui::DragValue::new(&mut edit.length)
+                            .speed(0.10)
+                            .range(0.24..=SHEET.length())
+                            .suffix(" м"),
+                    );
+                    if ui.button("+").clicked() {
+                        edit.length = (edit.length + 0.25).min(SHEET.length());
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Толщина");
+                    if ui.button("−").clicked() {
+                        edit.thickness = (edit.thickness - 0.02).max(0.08);
+                    }
+                    ui.add(
+                        egui::DragValue::new(&mut edit.thickness)
+                            .speed(0.01)
+                            .range(0.08..=0.80)
+                            .suffix(" м"),
+                    );
+                    if ui.button("+").clicked() {
+                        edit.thickness = (edit.thickness + 0.02).min(0.80);
+                    }
+                });
+                apply = ui.button("Применить").clicked();
+            });
+        if apply {
+            let previous = self.plan.clone();
+            if self
+                .plan
+                .resize_wall(edit.index, edit.length, edit.thickness)
+            {
+                self.remember(previous);
+                self.wall_edit = None;
+                self.message.clear();
+            } else {
+                self.message = "Стена выйдет за лист или перекроет проём".into();
+            }
+        } else if !open {
+            self.wall_edit = None;
+        }
+    }
+
     fn sheet(&mut self, ui: &mut egui::Ui, mobile: bool, atlas: &FurnishingAtlas) {
         let space = ui
             .available_rect_before_wrap()
             .shrink(if mobile { 4.0 } else { 22.0 });
-        let portrait = mobile && space.height() > space.width();
+        let portrait = self.portrait_sheet.unwrap_or(mobile);
         let dimensions = if portrait {
             Vec2::new(SHEET.y, SHEET.x)
         } else {
@@ -478,22 +623,40 @@ impl Editor {
                 );
             }
         }
-        let wall_stroke = (0.18 * scale).max(2.0);
-        for wall in &self.plan.walls {
+        for (index, wall) in self.plan.walls.iter().enumerate() {
+            let wall_stroke = (wall.thickness * scale).max(2.0);
             let (a, b) = wall.points();
-            painter.line_segment([screen(a), screen(b)], Stroke::new(wall_stroke, INK));
+            let selected = self
+                .wall_edit
+                .as_ref()
+                .is_some_and(|edit| edit.index == index);
+            painter.line_segment(
+                [screen(a), screen(b)],
+                Stroke::new(wall_stroke, if selected { ACCENT } else { INK }),
+            );
             let dir = (b - a).normalize();
             for opening in &wall.openings {
                 let start = a + dir * (opening.at - opening.kind.width() / 2.0);
                 let end = start + dir * opening.kind.width();
                 let span = [screen(start), screen(end)];
                 painter.line_segment(span, Stroke::new(wall_stroke + 1.0, PAPER));
-                if opening.kind == OpeningKind::Window {
-                    painter
-                        .line_segment(span, Stroke::new(2.0_f32, Color32::from_rgb(31, 127, 174)));
-                } else {
-                    let open = screen(start + Vec2::new(-dir.y, dir.x) * opening.kind.width());
-                    painter.line_segment([screen(start), open], Stroke::new(1.2_f32, ACCENT));
+                match opening.kind {
+                    OpeningKind::Window => {
+                        painter.line_segment(
+                            span,
+                            Stroke::new(2.0_f32, Color32::from_rgb(31, 127, 174)),
+                        );
+                    }
+                    OpeningKind::Garage => {
+                        painter.line_segment(
+                            span,
+                            Stroke::new(2.0_f32, Color32::from_rgb(162, 95, 39)),
+                        );
+                    }
+                    OpeningKind::Door => {
+                        let open = screen(start + Vec2::new(-dir.y, dir.x) * opening.kind.width());
+                        painter.line_segment([screen(start), open], Stroke::new(1.2_f32, ACCENT));
+                    }
                 }
             }
         }
@@ -512,7 +675,43 @@ impl Editor {
                 corners.map(|corner| screen(item.point(corner))),
             );
         }
-        if self.shape_at.is_none() {
+        if let Some(kind) = egui::DragAndDrop::payload::<OpeningKind>(ui.ctx()) {
+            let (point, released) = ui.input(|input| {
+                (
+                    input
+                        .pointer
+                        .interact_pos()
+                        .filter(|point| rect.contains(*point)),
+                    input.pointer.button_released(egui::PointerButton::Primary),
+                )
+            });
+            let target = point.and_then(|point| {
+                self.plan
+                    .snap_opening(*kind, position(point), (22.0 / scale).clamp(0.40, 1.3))
+            });
+            if let Some(target) = target {
+                painter.line_segment(target.span.map(screen), Stroke::new(5.0_f32, ACCENT));
+                if released {
+                    let previous = self.plan.clone();
+                    if self.plan.attach_opening(target) {
+                        self.remember(previous);
+                        self.message.clear();
+                    }
+                }
+            } else if let Some(point) = point {
+                painter.circle_stroke(
+                    point,
+                    7.0,
+                    Stroke::new(2.0_f32, Color32::from_rgb(172, 65, 66)),
+                );
+                if released {
+                    self.message = "Для проёма нужна подходящая свободная стена".into();
+                }
+            }
+            if released {
+                egui::DragAndDrop::take_payload::<OpeningKind>(ui.ctx());
+            }
+        } else if self.shape_at.is_none() && self.wall_edit.is_none() {
             let pointer = response.interact_pointer_pos().map(position);
             if response.double_clicked() {
                 self.cancel_mark();
@@ -609,13 +808,23 @@ impl Editor {
                     self.plan.wall(start, snap)
                 }
             }
-            Tool::Door | Tool::Window => {
-                let kind = if self.tool == Tool::Door {
-                    OpeningKind::Door
+            Tool::Door | Tool::Window | Tool::Garage => self
+                .tool
+                .opening()
+                .is_some_and(|kind| self.plan.opening(kind, point)),
+            Tool::Edit => {
+                if let Some((index, _)) = self.plan.nearest_wall(point, 0.6) {
+                    let wall = &self.plan.walls[index];
+                    let (a, b) = wall.points();
+                    self.wall_edit = Some(WallEdit {
+                        index,
+                        length: a.distance(b),
+                        thickness: wall.thickness,
+                    });
                 } else {
-                    OpeningKind::Window
-                };
-                self.plan.opening(kind, point)
+                    self.message = "Коснитесь стены".into();
+                }
+                return;
             }
             Tool::Erase => self.plan.erase(point),
             tool => {
@@ -677,4 +886,70 @@ impl Editor {
 
 fn snap_point(point: Vec2) -> Vec2 {
     (point * 2.0).round() / 2.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_survives_touch_pointer_gone_on_drop() {
+        let ctx = egui::Context::default();
+        let atlas = FurnishingAtlas::build().unwrap();
+        let atlas = FurnishingAtlas::upload(&ctx, &atlas);
+        let mut editor = Editor::default();
+        assert!(editor.plan.wall(Vec2::new(4.0, 8.0), Vec2::new(20.0, 8.0)));
+
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 700.0));
+        let frame = |editor: &mut Editor, events: Vec<egui::Event>| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| editor.ui(ctx, &atlas),
+            )
+        };
+        let layout = frame(&mut editor, vec![]);
+        let source = layout
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "Ворота" => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("garage tool is visible");
+        let destination = layout
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.fill == PAPER => Some(rect.rect.center()),
+                _ => None,
+            })
+            .expect("planning sheet is visible");
+        let touch_button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(
+            &mut editor,
+            vec![
+                egui::Event::PointerMoved(source),
+                touch_button(source, true),
+            ],
+        );
+        frame(&mut editor, vec![egui::Event::PointerMoved(destination)]);
+        assert!(egui::DragAndDrop::payload::<OpeningKind>(&ctx).is_some());
+        frame(
+            &mut editor,
+            vec![touch_button(destination, false), egui::Event::PointerGone],
+        );
+        assert_eq!(editor.plan.walls[0].openings.len(), 1);
+        assert!(editor.plan.walls[0].openings[0].kind == OpeningKind::Garage);
+    }
 }

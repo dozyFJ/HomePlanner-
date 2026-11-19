@@ -10,7 +10,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <activity android:name="android.app.NativeActivity" android:exported="false"
+        <activity android:name=".PlannerActivity" android:exported="false"
             android:theme="@style/HomePlannerEditorTheme"
             android:screenOrientation="portrait"
             android:configChanges="orientation|keyboardHidden|screenSize|smallestScreenSize|screenLayout|uiMode|density">
