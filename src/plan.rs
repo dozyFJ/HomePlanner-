@@ -83,6 +83,51 @@ pub enum FurnitureKind {
     StairU,
 }
 
+impl FurnitureKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Bed => "Кровать",
+            Self::Table => "Стол",
+            Self::Sofa => "Диван",
+            Self::Cabinet => "Шкаф",
+            Self::Lamp => "Торшер",
+            Self::Stair => "Лестница",
+            Self::StairL => "Лестница 90°",
+            Self::StairU => "Лестница 180°",
+        }
+    }
+}
+
+pub fn item_at(item: Furniture, center: Vec2) -> Furniture {
+    let size = item.size();
+    let half = Vec2::new(size.x, size.z) * 0.5;
+    Furniture {
+        at: center.clamp(half, SHEET - half).to_array(),
+        ..item
+    }
+}
+
+pub fn snap_point(point: Vec2) -> Vec2 {
+    (point * 2.0).round() / 2.0
+}
+
+pub fn copy_furniture(plan: &Plan, item: Furniture) -> Option<Furniture> {
+    let center = Vec2::from_array(item.at);
+    let size = item.size();
+    let offsets = [Vec2::new(size.x + 0.25, 0.0), Vec2::new(0.0, size.z + 0.25)];
+    offsets
+        .into_iter()
+        .flat_map(|offset| [center + offset, center - offset])
+        .map(|point| item_at(item, snap_point(point)))
+        .find(|copy| {
+            let (a, b) = copy.bounds();
+            plan.furniture.iter().all(|existing| {
+                let (c, d) = existing.bounds();
+                a.cmpge(d).any() || c.cmpge(b).any()
+            })
+        })
+}
+
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Furniture {
     pub at: [f32; 2],

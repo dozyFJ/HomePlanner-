@@ -1,12 +1,12 @@
 use std::{fs, path::PathBuf};
 
-use egui::{Align2, Color32, FontId, Frame, Pos2, Rect, Sense, Stroke, pos2, vec2};
+use egui::{Align2, Color32, FontId, Frame, Pos2, Rect, RichText, Sense, Stroke, pos2, vec2};
 use glam::{Quat, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 use wolfcraft_engine::renderer::{FrameParams, model::ModelVertex};
 
 use crate::furnishings::FurnishingAtlas;
-use crate::plan::{self, Plan};
+use crate::plan::{self, copy_furniture, item_at, snap_point, Furniture, FurnitureKind, Plan, SHEET};
 
 const GROUND: f32 = 40.0;
 
@@ -90,10 +90,11 @@ enum View {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Mode {
+pub enum Mode {
     Orbit,
     Pan,
     Move,
+    Furniture,
     Plan,
 }
 
@@ -103,6 +104,18 @@ struct Drag {
     normal: Vec3,
     offset: Vec3,
     preview: Cube,
+}
+
+struct FurnitureDrag3D {
+    index: usize,
+    offset: Vec2,
+    initial_plan: Plan,
+}
+
+#[derive(Default)]
+pub struct ModelingOutput {
+    pub plan_tap: Option<(Vec2, Pos2)>,
+    pub plan_changed: Option<Plan>,
 }
 
 pub struct Modeling {
@@ -119,6 +132,8 @@ pub struct Modeling {
     distance: f32,
     pan: Vec3,
     drag: Option<Drag>,
+    furniture_drag: Option<FurnitureDrag3D>,
+    furniture_outline: Option<[glam::DVec3; 8]>,
     house_bounds: Option<(Vec2, Vec2)>,
 }
 
@@ -138,6 +153,8 @@ impl Default for Modeling {
             distance: 7.5,
             pan: Vec3::ZERO,
             drag: None,
+            furniture_drag: None,
+            furniture_outline: None,
             house_bounds: None,
         }
     }
@@ -295,8 +312,13 @@ impl Modeling {
         mobile: bool,
         outline: Option<(Vec2, Vec2)>,
         start: Option<Vec2>,
-    ) -> Option<(Vec2, Pos2)> {
-        let mut plan_tap = None;
+        plan: &mut Plan,
+        furniture_selection: &mut Option<usize>,
+    ) -> ModelingOutput {
+        let mut output = ModelingOutput::default();
+        self.furniture_outline = furniture_selection
+            .and_then(|idx| plan.furniture.get(idx))
+            .map(furniture_corners);
         let cancelled = ctx.input(|input| {
             input.key_pressed(egui::Key::Escape)
                 || input.events.iter().any(|event| {
@@ -311,6 +333,7 @@ impl Modeling {
         });
         if cancelled {
             self.drag = None;
+            self.furniture_drag = None;
         }
         egui::TopBottomPanel::bottom("model_tools")
             .frame(crate::theme::toolbar(ctx))
@@ -322,12 +345,14 @@ impl Modeling {
                     for (mode, label) in [
                         (Mode::Orbit, "Орбита"),
                         (Mode::Pan, "Сдвиг"),
-                        (Mode::Move, "Двигать куб"),
+                        (Mode::Move, "Кубы"),
+                        (Mode::Furniture, "Мебель 3D"),
                         (Mode::Plan, "Править план"),
                     ] {
                         if ui.selectable_label(self.mode == mode, label).clicked() {
                             self.mode = mode;
                             self.drag = None;
+                            self.furniture_drag = None;
                             if mode == Mode::Plan {
                                 self.set_view(View::Top);
                                 self.focus_house();
@@ -359,6 +384,64 @@ impl Modeling {
                         self.focus();
                     }
                 });
+                if self.mode == Mode::Furniture {
+                    ui.separator();
+                    if let Some(index) = *furniture_selection
+                        && let Some(&item) = plan.furniture.get(index)
+                    {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(format!("Выбрано: {}", item.kind.name())).strong());
+                            if ui.button("↶ 90°").on_hover_text("Повернуть на 90°").clicked() {
+                                let prev = plan.clone();
+                                let mut rotated = item;
+                                rotated.rotated = !rotated.rotated;
+                                plan.furniture[index] = item_at(rotated, Vec2::from_array(item.at));
+                                output.plan_changed = Some(prev);
+                            }
+                            if ui.button("Копия").on_hover_text("Создать копию рядом").clicked() {
+                                if let Some(copy) = copy_furniture(plan, item) {
+                                    let prev = plan.clone();
+                                    plan.furniture.push(copy);
+                                    *furniture_selection = Some(plan.furniture.len() - 1);
+                                    output.plan_changed = Some(prev);
+                                    self.message.clear();
+                                } else {
+                                    self.message = "Рядом нет места для копии".into();
+                                }
+                            }
+                            if ui.button("Удалить").on_hover_text("Удалить предмет").clicked() {
+                                let prev = plan.clone();
+                                plan.furniture.remove(index);
+                                *furniture_selection = None;
+                                output.plan_changed = Some(prev);
+                            }
+                            if ui.button("×").on_hover_text("Снять выбор").clicked() {
+                                *furniture_selection = None;
+                            }
+                        });
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Добавить:");
+                        for kind in FurnitureKind::ALL {
+                            if ui.small_button(format!("+ {}", kind.name())).clicked() {
+                                let prev = plan.clone();
+                                let center = snap_point(Vec2::new(self.pan.x, self.pan.z))
+                                    .clamp(Vec2::splat(1.0), SHEET - Vec2::splat(1.0));
+                                let item = item_at(
+                                    Furniture {
+                                        at: center.to_array(),
+                                        kind,
+                                        rotated: false,
+                                    },
+                                    center,
+                                );
+                                plan.furniture.push(item);
+                                *furniture_selection = Some(plan.furniture.len() - 1);
+                                output.plan_changed = Some(prev);
+                            }
+                        }
+                    });
+                }
                 ui.separator();
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("+ Куб").clicked() {
@@ -454,18 +537,30 @@ impl Modeling {
                 let pointer = response.interact_pointer_pos();
                 if !cancelled && response.clicked() {
                     if self.editing_plan() {
-                        plan_tap = pointer.and_then(|point| {
+                        output.plan_tap = pointer.and_then(|point| {
                             let hit = plane_hit(ray_at(point), Vec3::Y * GROUND, Vec3::Y)?;
                             Some((Vec2::new(hit.x, hit.z), point))
                         });
+                    } else if self.mode == Mode::Furniture {
+                        if let Some(click_pos) = pointer {
+                            let ray = ray_at(click_pos);
+                            *furniture_selection = pick_furniture(plan, ray);
+                            if furniture_selection.is_some() {
+                                self.selected = None;
+                            }
+                        }
                     } else {
                         self.selected = pointer.and_then(|point| self.pick(ray_at(point)));
+                        if self.selected.is_some() {
+                            *furniture_selection = None;
+                        }
                     }
                 }
                 let pinch = ctx.input(|input| input.multi_touch());
                 if response.hovered() || response.dragged() {
                     if let Some(touch) = pinch {
                         self.drag = None;
+                        self.furniture_drag = None;
                         self.zoom(1.0 / touch.zoom_delta.max(0.01));
                     } else {
                         let wheel = ctx.input(|input| input.raw_scroll_delta.y);
@@ -473,7 +568,61 @@ impl Modeling {
                     }
                 }
                 if !cancelled && pinch.is_none() {
-                    if self.mode == Mode::Move {
+                    if self.mode == Mode::Furniture {
+                        if response.drag_started() {
+                            if let Some(start_pos) = ctx.input(|input| input.pointer.press_origin()) {
+                                let ray = ray_at(start_pos);
+                                if let Some(index) = pick_furniture(plan, ray) {
+                                    *furniture_selection = Some(index);
+                                    self.selected = None;
+                                    if let Some(floor_hit) = plane_hit(ray, Vec3::Y * GROUND, Vec3::Y) {
+                                        let item = plan.furniture[index];
+                                        let offset = Vec2::from_array(item.at) - Vec2::new(floor_hit.x, floor_hit.z);
+                                        self.furniture_drag = Some(FurnitureDrag3D {
+                                            index,
+                                            offset,
+                                            initial_plan: plan.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(drag) = &self.furniture_drag {
+                            if let Some(current_pos) = pointer {
+                                let ray = ray_at(current_pos);
+                                if let Some(floor_hit) = plane_hit(ray, Vec3::Y * GROUND, Vec3::Y) {
+                                    let target = Vec2::new(floor_hit.x, floor_hit.z) + drag.offset;
+                                    let snapped = snap_point(target);
+                                    let item = item_at(plan.furniture[drag.index], snapped);
+                                    plan.furniture[drag.index] = item;
+                                    ctx.request_repaint();
+                                }
+                            }
+                        }
+                        if response.drag_stopped() {
+                            if let Some(drag) = self.furniture_drag.take() {
+                                if let Some(item) = plan.furniture.get(drag.index) {
+                                    if let Some(orig) = drag.initial_plan.furniture.get(drag.index) {
+                                        if item != orig {
+                                            output.plan_changed = Some(drag.initial_plan);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if self.furniture_drag.is_none() && response.dragged() {
+                            let delta = response.drag_delta();
+                            if ctx.input(|input| input.modifiers.shift) {
+                                let right = camera.forward.cross(camera.up).normalize();
+                                let unit = self.distance * 0.0015;
+                                self.pan += (-right * delta.x + camera.up * delta.y) * unit;
+                            } else {
+                                self.view = View::Orbit;
+                                self.yaw -= delta.x * 0.009;
+                                self.pitch = (self.pitch + delta.y * 0.009).clamp(-1.40, 1.52);
+                            }
+                        }
+                    } else if self.mode == Mode::Move {
                         if response.drag_started() {
                             let start = ctx.input(|input| input.pointer.press_origin());
                             self.drag = start.and_then(|start| {
@@ -532,18 +681,54 @@ impl Modeling {
                         }
                     }
                 }
-                if self.editing_plan() {
-                    let project = |p: Vec2| {
-                        let v = Vec3::new(p.x, GROUND, p.y) - camera.eye.as_vec3();
-                        let t = (camera.fov_y * 0.5).tan() * v.dot(camera.forward);
-                        let right = camera.forward.cross(camera.up).normalize();
+                let project_3d = |p: Vec3| {
+                    let v = p - camera.eye.as_vec3();
+                    let forward_dist = v.dot(camera.forward);
+                    if forward_dist <= 0.05 {
+                        return None;
+                    }
+                    let t = (camera.fov_y * 0.5).tan() * forward_dist;
+                    let right = camera.forward.cross(camera.up).normalize();
+                    Some(
                         screen.center()
                             + vec2(
                                 screen.width() * 0.5 * v.dot(right) / (t * camera.aspect),
                                 -screen.height() * 0.5 * v.dot(camera.up) / t,
-                            )
+                            ),
+                    )
+                };
+                let painter = ui.painter_at(rect);
+                if let Some(index) = *furniture_selection
+                    && let Some(item) = plan.furniture.get(index)
+                {
+                    let corners = furniture_corners(item);
+                    let proj: Vec<Option<Pos2>> = corners.iter().map(|c| project_3d(c.as_vec3())).collect();
+                    let edges = [
+                        (0, 1), (1, 3), (3, 2), (2, 0),
+                        (4, 5), (5, 7), (7, 6), (6, 4),
+                        (0, 4), (1, 5), (2, 6), (3, 7),
+                    ];
+                    let stroke = Stroke::new(2.0_f32, crate::theme::ACCENT);
+                    for (a, b) in edges {
+                        if let (Some(pa), Some(pb)) = (proj[a], proj[b]) {
+                            painter.line_segment([pa, pb], stroke);
+                        }
+                    }
+                    let top_center = Vec3::new(item.at[0], GROUND + item.size().y + 0.35, item.at[1]);
+                    if let Some(pos) = project_3d(top_center) {
+                        painter.text(
+                            pos,
+                            Align2::CENTER_BOTTOM,
+                            item.kind.name(),
+                            FontId::proportional(13.0),
+                            crate::theme::ACCENT,
+                        );
+                    }
+                }
+                if self.editing_plan() {
+                    let project = |p: Vec2| {
+                        project_3d(Vec3::new(p.x, GROUND, p.y)).unwrap_or(screen.center())
                     };
-                    let painter = ui.painter_at(rect);
                     let stroke = Stroke::new(2.0_f32, crate::theme::ACCENT);
                     if let Some((a, b)) = outline {
                         painter.rect_stroke(
@@ -558,7 +743,7 @@ impl Modeling {
                 }
                 axes(ui.painter(), rect, &camera);
             });
-        plan_tap
+        output
     }
 
     fn pick(&self, (origin, ray): (Vec3, Vec3)) -> Option<usize> {
@@ -595,10 +780,12 @@ impl Modeling {
             underwater: false,
             view_distance_blocks: 230.0,
             time,
-            outline: self.selected.and_then(|i| {
-                self.cubes
-                    .get(i)
-                    .map(|cube| self.drawn_cube(i, *cube).corners())
+            outline: self.furniture_outline.or_else(|| {
+                self.selected.and_then(|i| {
+                    self.cubes
+                        .get(i)
+                        .map(|cube| self.drawn_cube(i, *cube).corners())
+                })
             }),
             crack: 0.0,
             viewmodel_fov_y: 0.0,
@@ -759,6 +946,68 @@ fn axes(painter: &egui::Painter, rect: Rect, camera: &FrameParams) {
     }
 }
 
+pub fn hit_furniture(furniture: &Furniture, origin: Vec3, ray: Vec3) -> Option<f32> {
+    let size = furniture.size();
+    let center = Vec3::new(furniture.at[0], GROUND + size.y * 0.5 + 0.01, furniture.at[1]);
+    let half = size * 0.5;
+    let local = origin - center;
+    let mut near = 0.0_f32;
+    let mut far = f32::INFINITY;
+    for axis in 0..3 {
+        if ray[axis].abs() < 1e-6 {
+            if local[axis].abs() > half[axis] {
+                return None;
+            }
+            continue;
+        }
+        let a = (-half[axis] - local[axis]) / ray[axis];
+        let b = (half[axis] - local[axis]) / ray[axis];
+        near = near.max(a.min(b));
+        far = far.min(a.max(b));
+        if near > far {
+            return None;
+        }
+    }
+    Some(near)
+}
+
+pub fn furniture_corners(furniture: &Furniture) -> [glam::DVec3; 8] {
+    let size = furniture.size();
+    let center = Vec3::new(furniture.at[0], GROUND + size.y * 0.5 + 0.01, furniture.at[1]);
+    let half = size * 0.5;
+    std::array::from_fn(|index| {
+        let sign = |bit: usize| {
+            if index & (1_usize << bit) == 0_usize {
+                -half[bit]
+            } else {
+                half[bit]
+            }
+        };
+        (center + Vec3::new(sign(0), sign(1), sign(2))).as_dvec3()
+    })
+}
+
+fn pick_furniture(plan: &Plan, (origin, ray): (Vec3, Vec3)) -> Option<usize> {
+    let mut hits = Vec::new();
+    for (index, item) in plan.furniture.iter().enumerate() {
+        if let Some(dist) = hit_furniture(item, origin, ray) {
+            hits.push((index, dist));
+        }
+    }
+    if let Some(floor) = plane_hit((origin, ray), Vec3::Y * GROUND, Vec3::Y) {
+        let floor_pt = Vec2::new(floor.x, floor.z);
+        let floor_dist = (floor - origin).length();
+        for (index, item) in plan.furniture.iter().enumerate() {
+            let (min, max) = item.bounds();
+            if floor_pt.cmpge(min).all() && floor_pt.cmple(max).all() {
+                hits.push((index, floor_dist));
+            }
+        }
+    }
+    hits.sort_by(|a, b| a.1.total_cmp(&b.1));
+    hits.first().map(|(idx, _)| *idx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,7 +1031,7 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |ctx| selected = scene.ui(ctx, false, None, None),
+                |ctx| selected = scene.ui(ctx, false, None, None, &mut plan, &mut None).plan_tap,
             );
         };
         let button = |pressed| egui::Event::PointerButton {
@@ -797,6 +1046,23 @@ mod tests {
         let (point, _) = selected.expect("tap in 3D plan mode");
         assert!((point - Vec2::splat(8.0)).length() < 0.001);
         assert_eq!(plan.room_at(point), Some(0));
+    }
+
+    #[test]
+    fn furniture_3d_pick_and_outline() {
+        let mut plan = Plan::default();
+        plan.furniture.push(Furniture {
+            at: [10.0, 10.0],
+            kind: FurnitureKind::Table,
+            rotated: false,
+        });
+        let origin = Vec3::new(10.0, 45.0, 10.0);
+        let ray = Vec3::NEG_Y;
+        assert!(hit_furniture(&plan.furniture[0], origin, ray).is_some());
+        let picked = pick_furniture(&plan, (origin, ray));
+        assert_eq!(picked, Some(0));
+        let corners = furniture_corners(&plan.furniture[0]);
+        assert_eq!(corners.len(), 8);
     }
 
     #[test]

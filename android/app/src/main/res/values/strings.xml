@@ -27,4 +27,7 @@
     <string name="project_error">Не удалось создать проект</string>
     <string name="dark_mode">Тёмная тема</string>
     <string name="theme_error">Не удалось сохранить тему</string>
+    <string name="recent_projects">Последние</string>
+    <string name="all_projects">Все проекты</string>
+    <string name="updates_btn">Обновления</string>
 </resources>

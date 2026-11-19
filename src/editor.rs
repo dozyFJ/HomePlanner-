@@ -11,7 +11,10 @@ use wolfcraft_engine::renderer::FrameParams;
 use crate::furnishings::FurnishingAtlas;
 use crate::modeling::Modeling;
 use crate::navigation::{self, Destination};
-use crate::plan::{FloorFinish, Furniture, FurnitureKind, OpeningKind, Plan, SHEET};
+use crate::plan::{
+    copy_furniture, item_at, snap_point, FloorFinish, Furniture, FurnitureKind, OpeningKind, Plan,
+    SHEET,
+};
 use crate::scan::Photo;
 use crate::sheet_edit::{HouseSelection, pencil_vertices};
 
@@ -485,21 +488,7 @@ impl Editor {
                 self.move_furniture(index, item_at(rotated, Vec2::from_array(item.at)));
             }
             if ui.button("Копировать").clicked() {
-                let center = Vec2::from_array(item.at);
-                let size = item.size();
-                let offsets = [Vec2::new(size.x + 0.25, 0.0), Vec2::new(0.0, size.z + 0.25)];
-                let destination = offsets
-                    .into_iter()
-                    .flat_map(|offset| [center + offset, center - offset])
-                    .map(|point| item_at(item, snap_point(point)))
-                    .find(|copy| {
-                        let (a, b) = copy.bounds();
-                        self.plan.furniture.iter().all(|existing| {
-                            let (c, d) = existing.bounds();
-                            a.cmpge(d).any() || c.cmpge(b).any()
-                        })
-                    });
-                if let Some(copy) = destination {
+                if let Some(copy) = copy_furniture(&self.plan, item) {
                     let previous = self.plan.clone();
                     self.furniture_selection = Some(self.plan.furniture.len());
                     self.plan.furniture.push(copy);
@@ -991,7 +980,18 @@ impl Editor {
         if self.modeling_open {
             self.modeling.sync_house(&self.plan);
             let outline = self.outline_bounds();
-            if let Some((point, screen)) = self.modeling.ui(ctx, mobile, outline, self.start) {
+            let output = self.modeling.ui(
+                ctx,
+                mobile,
+                outline,
+                self.start,
+                &mut self.plan,
+                &mut self.furniture_selection,
+            );
+            if let Some(previous) = output.plan_changed {
+                self.remember(previous);
+            }
+            if let Some((point, screen)) = output.plan_tap {
                 if self.room_edit.is_none() && self.wall_edit.is_none() {
                     if self.outline_action.is_none() {
                         self.outline_anchor = Some(screen + vec2(14.0, 14.0));
@@ -2017,19 +2017,6 @@ fn brand(ui: &mut egui::Ui) {
 fn floor_color(finish: FloorFinish) -> Color32 {
     let [r, g, b] = finish.color().map(|channel| (channel * 255.0) as u8);
     Color32::from_rgb(r, g, b)
-}
-
-fn item_at(item: Furniture, center: Vec2) -> Furniture {
-    let size = item.size();
-    let half = Vec2::new(size.x, size.z) * 0.5;
-    Furniture {
-        at: center.clamp(half, SHEET - half).to_array(),
-        ..item
-    }
-}
-
-fn snap_point(point: Vec2) -> Vec2 {
-    (point * 2.0).round() / 2.0
 }
 
 #[cfg(test)]
