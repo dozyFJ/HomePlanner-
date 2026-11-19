@@ -1,6 +1,7 @@
 mod editor;
 mod furnishings;
 mod modeling;
+mod navigation;
 mod plan;
 mod scan;
 mod sheet_edit;
@@ -68,7 +69,12 @@ impl Graphics {
             let aspect = width as f32 / height as f32;
             let (params, model) = if editor.modeling_open {
                 let params = editor.modeling.frame_params(aspect, elapsed);
-                let model = editor.modeling.vertices(params.eye.as_vec3());
+                let model = editor.modeling.scene_vertices(
+                    &editor.plan,
+                    params.eye.as_vec3(),
+                    editor.cutaway,
+                    &self.furnishings,
+                );
                 (params, model)
             } else {
                 let params = editor.camera(aspect, elapsed);

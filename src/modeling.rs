@@ -1,9 +1,12 @@
 use std::{fs, path::PathBuf};
 
 use egui::{Align2, Color32, FontId, Frame, Pos2, Rect, Sense, Stroke, pos2, vec2};
-use glam::{Quat, Vec3};
+use glam::{Quat, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 use wolfcraft_engine::renderer::{FrameParams, model::ModelVertex};
+
+use crate::furnishings::FurnishingAtlas;
+use crate::plan::{self, Plan};
 
 const GROUND: f32 = 40.0;
 
@@ -13,6 +16,12 @@ struct Cube {
     size: f32,
     angle: f32,
 }
+
+const STARTER: Cube = Cube {
+    center: [0.0, 1.0, 0.0],
+    size: 2.0,
+    angle: 0.0,
+};
 
 impl Cube {
     fn center(self) -> Vec3 {
@@ -108,16 +117,13 @@ pub struct Modeling {
     distance: f32,
     pan: Vec3,
     drag: Option<Drag>,
+    house_bounds: Option<(Vec2, Vec2)>,
 }
 
 impl Default for Modeling {
     fn default() -> Self {
         Self {
-            cubes: vec![Cube {
-                center: [0.0, 1.0, 0.0],
-                size: 2.0,
-                angle: 0.0,
-            }],
+            cubes: vec![STARTER],
             selected: Some(0),
             undo: vec![],
             path: PathBuf::from("model.json"),
@@ -129,6 +135,7 @@ impl Default for Modeling {
             distance: 7.5,
             pan: Vec3::ZERO,
             drag: None,
+            house_bounds: None,
         }
     }
 }
@@ -182,15 +189,42 @@ impl Modeling {
         self.undo.push(self.cubes.clone());
     }
 
+    pub fn sync_house(&mut self, plan: &Plan) {
+        let bounds =
+            (!plan.walls.is_empty() || !plan.rooms.is_empty() || !plan.furniture.is_empty())
+                .then(|| plan.preview_bounds());
+        if self.house_bounds == bounds {
+            return;
+        }
+        self.house_bounds = bounds;
+        if bounds.is_some() {
+            if self.cubes.as_slice() == [STARTER] {
+                self.cubes.clear();
+                self.selected = None;
+            }
+            self.drag = None;
+            self.focus_house();
+        }
+    }
+
+    fn focus_house(&mut self) {
+        if let Some((min, max)) = self.house_bounds {
+            let center = (min + max) * 0.5;
+            self.pan = Vec3::new(center.x, 0.0, center.y);
+            self.distance = ((max - min).length() * 1.35).clamp(7.5, 60.0);
+        } else {
+            self.pan = Vec3::ZERO;
+            self.distance = 7.5;
+        }
+    }
+
     fn focus(&mut self) {
-        self.pan = self
-            .selected
-            .and_then(|index| self.cubes.get(index))
-            .map_or(Vec3::ZERO, |cube| Vec3::from_array(cube.center) - Vec3::Y);
-        self.distance = self
-            .selected
-            .and_then(|index| self.cubes.get(index))
-            .map_or(7.5, |cube| (cube.size * 3.75).clamp(3.0, 50.0));
+        if let Some(cube) = self.selected.and_then(|index| self.cubes.get(index)) {
+            self.pan = Vec3::from_array(cube.center) - Vec3::Y;
+            self.distance = (cube.size * 3.75).clamp(3.0, 50.0);
+        } else {
+            self.focus_house();
+        }
     }
 
     fn append(&mut self, cube: Cube) {
@@ -299,9 +333,12 @@ impl Modeling {
                             .cubes
                             .iter()
                             .map(|cube| cube.center[0] + cube.size * 0.5)
-                            .fold(-1.25, f32::max);
+                            .fold(self.house_bounds.map_or(-1.25, |(_, max)| max.x), f32::max);
+                        let z = self
+                            .house_bounds
+                            .map_or(0.0, |(min, max)| (min.y + max.y) * 0.5);
                         let cube = Cube {
-                            center: [(x + 1.25).min(98.0), 1.0, 0.0],
+                            center: [(x + 1.25).min(98.0), 1.0, z],
                             size: 2.0,
                             angle: 0.0,
                         };
@@ -509,7 +546,21 @@ impl Modeling {
             .map_or(cube, |drag| drag.preview)
     }
 
-    pub fn vertices(&self, eye: Vec3) -> Vec<ModelVertex> {
+    pub fn scene_vertices(
+        &self,
+        plan: &Plan,
+        eye: Vec3,
+        cutaway: bool,
+        atlas: &FurnishingAtlas,
+    ) -> Vec<ModelVertex> {
+        let mut vertices = self.vertices(eye);
+        if self.house_bounds.is_some() {
+            vertices.extend(plan::model(plan, eye, cutaway, Some(atlas)));
+        }
+        vertices
+    }
+
+    fn vertices(&self, eye: Vec3) -> Vec<ModelVertex> {
         let mut vertices = Vec::new();
         let y = GROUND - 0.004;
         let span = 30.0;
@@ -645,6 +696,23 @@ fn axes(painter: &egui::Painter, rect: Rect, camera: &FrameParams) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scene_frames_the_current_house_and_uses_its_live_geometry() {
+        let mut scene = Modeling::default();
+        let mut plan = Plan::default();
+        assert!(plan.room(Vec2::new(8.0, 3.0), Vec2::new(12.0, 7.0)));
+        scene.sync_house(&plan);
+        assert!(scene.cubes.is_empty());
+        assert_eq!(scene.pan, Vec3::new(10.0, 0.0, 5.0));
+        let atlas = FurnishingAtlas::build().unwrap();
+        let atlas = FurnishingAtlas::upload(&egui::Context::default(), &atlas);
+        let first = scene.scene_vertices(&plan, Vec3::ZERO, false, &atlas).len();
+        assert!(plan.wall(Vec2::new(10.0, 3.0), Vec2::new(10.0, 7.0)));
+        scene.sync_house(&plan);
+        let second = scene.scene_vertices(&plan, Vec3::ZERO, false, &atlas).len();
+        assert_eq!(second, first + 36);
+    }
 
     #[test]
     fn default_cube_is_pickable_from_every_preset() {

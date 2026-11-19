@@ -12,8 +12,8 @@ android {
         applicationId = "dev.dozyfj.homeplanner"
         minSdk = 26
         targetSdk = 35
-        versionCode = 8
-        versionName = "0.1.7"
+        versionCode = 9
+        versionName = "0.1.8"
         ndk { abiFilters += setOf("arm64-v8a") }
     }
     if (signingFile != null && signingPassword != null) {

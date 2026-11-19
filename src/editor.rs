@@ -10,6 +10,7 @@ use wolfcraft_engine::renderer::FrameParams;
 
 use crate::furnishings::FurnishingAtlas;
 use crate::modeling::Modeling;
+use crate::navigation::{self, Destination};
 use crate::plan::{FloorFinish, Furniture, FurnitureKind, OpeningKind, Plan, SHEET};
 use crate::scan::Photo;
 use crate::sheet_edit::{HouseSelection, pencil_vertices};
@@ -128,10 +129,11 @@ pub struct Editor {
     pub preview: bool,
     pub modeling_open: bool,
     pub modeling: Modeling,
+    catalog_open: bool,
     pub cutaway: bool,
     tool: Tool,
     start: Option<Vec2>,
-    delayed_tap: Option<(Vec2, Instant)>,
+    last_draw_tap: Option<(egui::Pos2, Instant)>,
     wall_drag_end: Option<Vec2>,
     shape_at: Option<Vec2>,
     wall_edit: Option<WallEdit>,
@@ -171,10 +173,11 @@ impl Default for Editor {
             preview: false,
             modeling_open: false,
             modeling: Modeling::default(),
+            catalog_open: false,
             cutaway: false,
             tool: Tool::Room,
             start: None,
-            delayed_tap: None,
+            last_draw_tap: None,
             wall_drag_end: None,
             shape_at: None,
             wall_edit: None,
@@ -271,15 +274,9 @@ impl Editor {
         Ok(())
     }
 
-    fn flush_tap(&mut self) {
-        if let Some((point, _)) = self.delayed_tap.take() {
-            self.apply(point);
-        }
-    }
-
     fn cancel_mark(&mut self) {
         self.start = None;
-        self.delayed_tap = None;
+        self.last_draw_tap = None;
         self.wall_drag_end = None;
         self.pencil.clear();
         self.house_move = None;
@@ -488,7 +485,6 @@ impl Editor {
     }
 
     fn menu_action(&mut self, project_action: ProjectAction) {
-        self.flush_tap();
         if let Err(error) = self.persist_project() {
             self.message = format!("Не удалось сохранить проект: {error}");
             return;
@@ -526,6 +522,7 @@ impl Editor {
             egui::DragAndDrop::clear_payload(ctx);
             self.cancel_mark();
             self.furniture_drag = None;
+            self.sheet_multitouch = false;
         }
         self.refresh_photo(ctx);
         let mobile = cfg!(target_os = "android");
@@ -571,7 +568,7 @@ impl Editor {
                     {
                         self.menu_action(ProjectAction::Close);
                     }
-                    ui.menu_button("⋯", |ui| {
+                    ui.menu_button("...", |ui| {
                         ui.set_max_width(240.0);
                         if has_projects && ui.button("Мои проекты").clicked() {
                             self.menu_action(ProjectAction::Open);
@@ -588,7 +585,6 @@ impl Editor {
                                 let portrait = ui.selectable_label(current, "Портрет").clicked();
                                 let landscape = ui.selectable_label(!current, "Альбом").clicked();
                                 if portrait || landscape {
-                                    self.flush_tap();
                                     self.cancel_mark();
                                     if portrait != current {
                                         self.sheet_zoom = 1.0;
@@ -602,77 +598,55 @@ impl Editor {
                         }
                     });
                 });
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .selectable_label(!self.preview && !self.modeling_open, "Лист 2D")
-                        .clicked()
-                    {
-                        self.preview = false;
-                        self.modeling_open = false;
-                    }
-                    if ui.selectable_label(self.preview, "Дом 3D").clicked() {
-                        self.modeling_open = false;
-                        self.flush_tap();
-                        self.cancel_mark();
-                        self.shape_at = None;
-                        self.clear_selection();
-                        self.message.clear();
-                        self.preview = true;
-                    }
-                    if ui
-                        .selectable_label(self.modeling_open, "Моделирование")
-                        .clicked()
-                    {
-                        self.flush_tap();
-                        self.cancel_mark();
-                        self.clear_selection();
-                        self.shape_at = None;
-                        self.preview = false;
-                        self.modeling_open = true;
-                    }
-                });
+            });
+        let active = if self.modeling_open {
+            Destination::Scene
+        } else if self.preview {
+            Destination::House
+        } else if self.catalog_open {
+            Destination::Catalog
+        } else {
+            Destination::Sheet
+        };
+        egui::TopBottomPanel::bottom("navigation")
+            .frame(theme::toolbar(ctx))
+            .show(ctx, |ui| {
+                if let Some(destination) = navigation::bar(ui, active) {
+                    self.select_destination(destination);
+                }
+                if mobile {
+                    ui.add_space(16.0);
+                }
             });
         if self.modeling_open {
+            self.modeling.sync_house(&self.plan);
             self.modeling.ui(ctx, mobile);
             return;
         }
         if !self.preview {
-            if mobile {
-                egui::TopBottomPanel::bottom("tools")
-                    .frame(theme::toolbar(ctx))
-                    .show(ctx, |ui| self.tools(ui, true));
-            } else {
-                egui::SidePanel::left("tools")
-                    .exact_width(180.0)
-                    .frame(theme::toolbar(ctx))
-                    .show(ctx, |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| self.tools(ui, false));
-                    });
-            }
-            egui::TopBottomPanel::bottom("help").show(ctx, |ui| {
-                let hint = match self.tool {
-                    Tool::Wall if self.start.is_some() => "Потяните стену или укажите конец.",
-                    Tool::Room if self.start.is_some() => "Укажите вторую точку.",
-                    Tool::Room => "Укажите два противоположных угла комнаты.",
-                    Tool::Wall => "Укажите начало стены или потяните от первой точки.",
-                    Tool::Pencil => "Проведите пальцем, чтобы начертить цепочку стен.",
-                    Tool::Pan => {
-                        "Ведите пальцем для сдвига. Сведите или разведите два пальца для масштаба."
-                    }
-                    Tool::House => "Коснитесь дома и перетащите его в новое место.",
-                    Tool::Door | Tool::Window | Tool::Garage => {
-                        "Перетащите инструмент на стену или коснитесь стены."
-                    }
-                    Tool::Edit => "Коснитесь стены, пола или мебели. Мебель можно перетянуть.",
-                    Tool::Erase => "Щёлкните по элементу, который хотите удалить.",
-                    _ => "Щёлкните по листу, чтобы поставить мебель.",
-                };
-                ui.label(if self.message.is_empty() {
-                    hint
+            if self.catalog_open {
+                if mobile {
+                    egui::TopBottomPanel::bottom("catalog")
+                        .frame(theme::toolbar(ctx))
+                        .show(ctx, |ui| {
+                            let max = (ctx.screen_rect().height() * 0.46).clamp(155.0, 305.0);
+                            egui::ScrollArea::vertical().max_height(max).show(ui, |ui| {
+                                self.tool_hint(ui);
+                                self.tools(ui, true);
+                            });
+                        });
                 } else {
-                    &self.message
-                });
-            });
+                    egui::SidePanel::left("catalog")
+                        .exact_width(180.0)
+                        .frame(theme::toolbar(ctx))
+                        .show(ctx, |ui| {
+                            egui::ScrollArea::vertical().show(ui, |ui| {
+                                self.tool_hint(ui);
+                                self.tools(ui, false);
+                            });
+                        });
+                }
+            }
             egui::CentralPanel::default().show(ctx, |ui| self.sheet(ui, mobile, atlas));
             self.shape_menu(ctx);
             self.wall_editor(ctx);
@@ -714,6 +688,41 @@ impl Editor {
         }
     }
 
+    fn select_destination(&mut self, destination: Destination) {
+        self.cancel_mark();
+        self.shape_at = None;
+        self.clear_selection();
+        self.message.clear();
+        self.preview = destination == Destination::House;
+        self.modeling_open = destination == Destination::Scene;
+        self.catalog_open = destination == Destination::Catalog;
+    }
+
+    fn tool_hint(&self, ui: &mut egui::Ui) {
+        let hint = match self.tool {
+            Tool::Wall if self.start.is_some() => "Потяните стену или укажите конец.",
+            Tool::Room if self.start.is_some() => "Укажите вторую точку.",
+            Tool::Room => "Укажите два противоположных угла комнаты.",
+            Tool::Wall => "Укажите начало стены или потяните от первой точки.",
+            Tool::Pencil => "Проведите пальцем, чтобы начертить цепочку стен.",
+            Tool::Pan => {
+                "Ведите пальцем для сдвига. Сведите или разведите два пальца для масштаба."
+            }
+            Tool::House => "Коснитесь дома и перетащите его в новое место.",
+            Tool::Door | Tool::Window | Tool::Garage => {
+                "Перетащите инструмент на стену или коснитесь стены."
+            }
+            Tool::Edit => "Коснитесь стены, пола или мебели. Мебель можно перетянуть.",
+            Tool::Erase => "Щёлкните по элементу, который хотите удалить.",
+            _ => "Щёлкните по листу, чтобы поставить мебель.",
+        };
+        ui.label(if self.message.is_empty() {
+            hint
+        } else {
+            &self.message
+        });
+    }
+
     fn tools(&mut self, ui: &mut egui::Ui, mobile: bool) {
         let tools = [
             Tool::Room,
@@ -747,7 +756,6 @@ impl Editor {
                     response.dnd_set_drag_payload(opening);
                 }
                 if response.clicked() || response.drag_started() {
-                    self.flush_tap();
                     self.cancel_mark();
                     self.clear_selection();
                     self.tool = tool;
@@ -784,12 +792,12 @@ impl Editor {
         ui.horizontal_wrapped(|ui| {
             if ui
                 .add_enabled(
-                    self.start.is_some() || self.delayed_tap.is_some() || !self.undo.is_empty(),
+                    self.start.is_some() || !self.undo.is_empty(),
                     egui::Button::new("Отменить"),
                 )
                 .clicked()
             {
-                if self.start.is_none() && self.delayed_tap.is_none() {
+                if self.start.is_none() {
                     if let Some(plan) = self.undo.pop() {
                         self.plan = plan;
                     }
@@ -822,7 +830,6 @@ impl Editor {
         }
         ui.horizontal_wrapped(|ui| {
             if ui.button("Сохранить").clicked() {
-                self.flush_tap();
                 self.message = self
                     .save()
                     .map(|_| "Проект сохранён".into())
@@ -1246,11 +1253,8 @@ impl Editor {
                         }
                     }
                 }
-            } else if response.double_clicked() && on_sheet {
-                self.cancel_mark();
-                self.shape_at = pointer.map(snap_point);
             } else if self.tool == Tool::Edit && response.drag_started() {
-                self.delayed_tap = None;
+                self.last_draw_tap = None;
                 let start = ui
                     .input(|i| i.pointer.press_origin())
                     .filter(|point| rect.contains(*point))
@@ -1280,7 +1284,6 @@ impl Editor {
                     self.furniture_selection = Some(drag.index);
                 }
             } else if self.tool == Tool::Wall && response.drag_started() {
-                self.flush_tap();
                 if self.start.is_none() {
                     self.start = ui
                         .input(|i| i.pointer.press_origin())
@@ -1299,20 +1302,12 @@ impl Editor {
                         self.apply(end);
                     }
                 }
-            } else if response.clicked() && on_sheet {
-                if let Some(point) = pointer {
-                    self.flush_tap();
-                    self.delayed_tap = Some((point, Instant::now() + Duration::from_millis(320)));
-                }
-            }
-        }
-        if let Some((point, deadline)) = self.delayed_tap {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                self.flush_tap();
-            } else {
-                painter.circle_filled(screen(snap_point(point)), 3.0, ACCENT);
-                ui.ctx().request_repaint_after(remaining);
+            } else if response.clicked()
+                && on_sheet
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                self.tap_sheet(pointer, position(pointer));
+                ui.ctx().request_repaint();
             }
         }
         if let Some(start) = self.start {
@@ -1354,6 +1349,22 @@ impl Editor {
             FontId::monospace(12.0),
             ACCENT,
         );
+    }
+
+    fn tap_sheet(&mut self, pointer: egui::Pos2, point: Vec2) {
+        let is_drawing = matches!(self.tool, Tool::Room | Tool::Wall);
+        let now = Instant::now();
+        let near_previous = self.last_draw_tap.is_some_and(|(previous, time)| {
+            now.duration_since(time) <= Duration::from_millis(320)
+                && previous.distance(pointer) <= 14.0
+        });
+        if is_drawing && self.start.is_some() && near_previous {
+            self.cancel_mark();
+            self.shape_at = Some(snap_point(point));
+        } else {
+            self.apply(point);
+            self.last_draw_tap = (is_drawing && self.start.is_some()).then_some((pointer, now));
+        }
     }
 
     fn apply(&mut self, point: Vec2) {
@@ -1559,6 +1570,53 @@ mod tests {
     }
 
     #[test]
+    fn touch_taps_draw_a_room_and_place_furniture_without_waiting_for_a_timer() {
+        let ctx = egui::Context::default();
+        let atlas = FurnishingAtlas::build().unwrap();
+        let atlas = FurnishingAtlas::upload(&ctx, &atlas);
+        let mut editor = Editor::default();
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 700.0));
+        let frame = |editor: &mut Editor, events: Vec<egui::Event>| {
+            ctx.run(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ctx| editor.ui(ctx, &atlas),
+            )
+        };
+        let layout = frame(&mut editor, vec![]);
+        let center = layout
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.fill == PAPER => Some(rect.rect.center()),
+                _ => None,
+            })
+            .expect("planning sheet is visible");
+        let tap = |editor: &mut Editor, pos| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                pressed,
+                button: egui::PointerButton::Primary,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(editor, vec![egui::Event::PointerMoved(pos), button(true)]);
+            frame(editor, vec![button(false), egui::Event::PointerGone]);
+        };
+
+        tap(&mut editor, center - vec2(70.0, 60.0));
+        assert!(editor.start.is_some());
+        tap(&mut editor, center + vec2(70.0, 60.0));
+        assert_eq!(editor.plan.rooms.len(), 1);
+        assert!(editor.shape_at.is_none());
+        editor.tool = Tool::Table;
+        tap(&mut editor, center);
+        assert_eq!(editor.plan.furniture.len(), 1);
+    }
+
+    #[test]
     fn pinching_the_sheet_zooms_without_drawing_walls() {
         let ctx = egui::Context::default();
         let atlas = FurnishingAtlas::build().unwrap();
@@ -1639,7 +1697,10 @@ mod tests {
         let ctx = egui::Context::default();
         let atlas = FurnishingAtlas::build().unwrap();
         let atlas = FurnishingAtlas::upload(&ctx, &atlas);
-        let mut editor = Editor::default();
+        let mut editor = Editor {
+            catalog_open: true,
+            ..Default::default()
+        };
         assert!(editor.plan.wall(Vec2::new(4.0, 8.0), Vec2::new(20.0, 8.0)));
 
         let screen = Rect::from_min_size(egui::Pos2::ZERO, vec2(900.0, 700.0));
