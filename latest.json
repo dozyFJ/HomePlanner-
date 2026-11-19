@@ -1,7 +1,7 @@
 {
-  "versionCode": 1,
-  "versionName": "0.1.0",
-  "url": "https://raw.githubusercontent.com/dozyFJ/HomePlanner-/ota/releases/HomePlanner-0.1.0.apk",
-  "sha256": "f8fab0207860082cf063e517b4e364c2b09806e0944663d7fdbdfef5217f44b5",
-  "sourceCommit": "a321e065f3c6fa32a1c84b1a7b52a050383b923d"
+  "versionCode": 2,
+  "versionName": "0.1.1",
+  "url": "https://raw.githubusercontent.com/dozyFJ/HomePlanner-/ota/releases/HomePlanner-0.1.1.apk",
+  "sha256": "c6950c34f27b87f9d7ef01f5a7fde15e14595620c92592c6b5a909a4414aab47",
+  "sourceCommit": "1b62dddcc68e4f6718d4e44c8f2bdf2c18634e21"
 }
