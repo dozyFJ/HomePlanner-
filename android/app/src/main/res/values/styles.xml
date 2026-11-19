@@ -1,0 +1,11 @@
+<resources>
+    <style name="HomePlannerTheme" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:colorAccent">#7BE5C9</item>
+        <item name="android:windowBackground">#13212A</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+    <style name="HomePlannerEditorTheme" parent="HomePlannerTheme">
+        <item name="android:windowFullscreen">true</item>
+    </style>
+</resources>

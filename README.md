@@ -23,3 +23,12 @@ cargo run --locked -- --smoke-test
 ```
 
 Для графического smoke-теста нужен рабочий дисплей и адаптер Vulkan или DirectX 12. Тест открывает пример и рендерит кадры 2D и 3D.
+
+## Android и OTA
+
+APK предназначен для **Android 8.0 и новее**, устройств **ARM64** с Vulkan.
+В приложении нажмите «Открыть планировщик». Редактор открывается горизонтально и хранит проект во внутренней папке приложения. Для масштаба 3D используйте кнопки «+» и «−».
+
+Для сборки нужны JDK 17+, Gradle 8.11.1, Android SDK 35, NDK r27d и цель Rust `aarch64-linux-android`. Укажите `ANDROID_HOME`, `ANDROID_NDK_HOME`, `HOMEPLANNER_KEYSTORE` и `HOMEPLANNER_KEYSTORE_PASSWORD`, затем запустите `scripts/build-android.sh`. Результат появится в `android/app/build/outputs/apk/release/`.
+
+При открытии приложения проверяется [latest.json](https://raw.githubusercontent.com/dozyFJ/HomePlanner-/ota/latest.json). Чтобы выпустить следующую версию, повысьте `versionCode` и обновите `versionName` в настройках Gradle. Подпишите APK тем же ключом с псевдонимом `homeplanner`. Опубликуйте APK как `releases/HomePlanner-<версия>.apk` и обновите `latest.json` в ветке `ota` одним коммитом. Манифест содержит `versionCode`, `versionName`, `url` и `sha256`. Клиент сверяет хеш, пакет, номер версии и подпись, затем предлагает подтвердить установку в Android.

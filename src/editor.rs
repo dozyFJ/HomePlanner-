@@ -72,6 +72,21 @@ impl Default for Editor {
 }
 
 impl Editor {
+    #[cfg(target_os = "android")]
+    pub fn for_android(path: PathBuf) -> Self {
+        let mut editor = Self {
+            path: path.to_string_lossy().into_owned(),
+            ..Self::default()
+        };
+        if path.is_file() {
+            if let Err(error) = editor.open() {
+                editor.message = error.to_string();
+            }
+            editor.undo.clear();
+        }
+        editor
+    }
+
     fn remember(&mut self, previous: Plan) {
         if self.undo.len() == 40 {
             self.undo.remove(0);
@@ -145,7 +160,11 @@ impl Editor {
         });
         if !self.preview {
             egui::SidePanel::left("tools")
-                .exact_width(180.0)
+                .exact_width(if cfg!(target_os = "android") {
+                    156.0
+                } else {
+                    180.0
+                })
                 .show(ctx, |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         ui.heading("Инструменты");
@@ -184,8 +203,10 @@ impl Editor {
                             self.load_example();
                         }
                         ui.separator();
-                        ui.label("Файл проекта");
-                        ui.text_edit_singleline(&mut self.path);
+                        if !cfg!(target_os = "android") {
+                            ui.label("Файл проекта");
+                            ui.text_edit_singleline(&mut self.path);
+                        }
                         ui.horizontal(|ui| {
                             if ui.button("Сохранить").clicked() {
                                 self.message = self
@@ -223,7 +244,15 @@ impl Editor {
         } else {
             egui::TopBottomPanel::bottom("camera").show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Перетаскивание — поворот · Колесо — масштаб");
+                    if ui.button("−").clicked() {
+                        self.distance = (self.distance * 1.16).min(95.0);
+                    }
+                    if ui.button("+").clicked() {
+                        self.distance = (self.distance / 1.16).max(5.0);
+                    }
+                    if !cfg!(target_os = "android") {
+                        ui.label("Перетаскивание — поворот · Колесо — масштаб");
+                    }
                     ui.checkbox(&mut self.cutaway, "Срез стен");
                 });
             });

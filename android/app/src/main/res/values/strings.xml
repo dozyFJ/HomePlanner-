@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">WolfCraft Home Planner</string>
+    <string name="open_editor">Открыть планировщик</string>
+    <string name="check_update">Проверить обновления</string>
+    <string name="download_update">Скачать %1$s</string>
+    <string name="install_update">Установить %1$s</string>
+    <string name="current_version">Версия %1$s</string>
+    <string name="checking_update">Проверяем обновления…</string>
+    <string name="downloading_update">Скачиваем обновление…</string>
+    <string name="no_update">Установлена последняя версия</string>
+    <string name="available_update">Доступна версия %1$s</string>
+    <string name="update_ready">Обновление проверено и готово к установке</string>
+    <string name="update_error">Не удалось проверить, скачать или открыть обновление</string>
+    <string name="install_permission">Разрешите установку из Home Planner в настройках Android и снова нажмите «Установить».</string>
+    <string name="no_vulkan">Для 3D требуется поддержка Vulkan.</string>
+</resources>

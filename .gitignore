@@ -1,2 +1,5 @@
 /target/
 /house.json
+/android/.gradle/
+/android/local.properties
+/android/**/build/

@@ -3,6 +3,9 @@ name = "wolfcraft-home-planner"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 egui = "0.29.1"
 glam = "0.29"
@@ -14,3 +17,10 @@ wolfcraft-assets = { git = "https://github.com/dozyFJ/WolfCraft.git", rev = "80c
 wolfcraft-common = { git = "https://github.com/dozyFJ/WolfCraft.git", rev = "80ca806c141d91edf74fde2b861a68214c6f0edb" }
 wolfcraft-engine = { git = "https://github.com/dozyFJ/WolfCraft.git", rev = "80ca806c141d91edf74fde2b861a68214c6f0edb" }
 wolfcraft-ui = { git = "https://github.com/dozyFJ/WolfCraft.git", rev = "80ca806c141d91edf74fde2b861a68214c6f0edb" }
+
+
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { version = "0.30.13", features = ["android-native-activity"] }
+
+[profile.release]
+strip = "symbols"
