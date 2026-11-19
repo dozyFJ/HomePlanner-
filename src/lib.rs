@@ -1,9 +1,11 @@
 mod editor;
+mod furnishings;
 mod plan;
 
 use std::{sync::Arc, time::Instant};
 
 use editor::Editor;
+use furnishings::FurnishingAtlas;
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
@@ -11,7 +13,7 @@ use winit::{
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowId},
 };
-use wolfcraft_assets::AtlasManager;
+use wolfcraft_assets::{AtlasKind, AtlasManager};
 use wolfcraft_common::gpu::GpuContext;
 use wolfcraft_engine::renderer::WorldRenderer;
 use wolfcraft_ui::GuiRenderer;
@@ -20,13 +22,16 @@ struct Graphics {
     gpu: GpuContext,
     gui: GuiRenderer,
     world: WorldRenderer,
+    furnishings: FurnishingAtlas,
 }
 
 impl Graphics {
     fn new(window: Arc<Window>) -> Result<Self, String> {
         let gpu = GpuContext::new(window.clone(), true, false)?;
-        let atlases = AtlasManager::new(None)?;
+        let mut atlases = AtlasManager::new(None)?;
+        *atlases.get_mut(AtlasKind::Entities) = FurnishingAtlas::build()?;
         let gui = GuiRenderer::new(&gpu.device, gpu.config.format, &window, &atlases);
+        let furnishings = FurnishingAtlas::upload(&gui.ctx, atlases.get(AtlasKind::Entities));
         let (width, height) = gpu.size();
         let world = WorldRenderer::new(
             &gpu.device,
@@ -36,7 +41,12 @@ impl Graphics {
             width,
             height,
         );
-        Ok(Self { gpu, gui, world })
+        Ok(Self {
+            gpu,
+            gui,
+            world,
+            furnishings,
+        })
     }
 
     fn frame(&mut self, editor: &mut Editor, elapsed: f32) {
@@ -45,11 +55,18 @@ impl Graphics {
         };
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.gpu.device.create_command_encoder(&Default::default());
-        let gui = self.gui.run(&self.gpu.window, |ctx| editor.ui(ctx));
+        let gui = self
+            .gui
+            .run(&self.gpu.window, |ctx| editor.ui(ctx, &self.furnishings));
         let (width, height) = self.gpu.size();
         if editor.preview {
             let params = editor.camera(width as f32 / height as f32, elapsed);
-            let model = plan::model(&editor.plan, params.eye.as_vec3(), editor.cutaway);
+            let model = plan::model(
+                &editor.plan,
+                params.eye.as_vec3(),
+                editor.cutaway,
+                Some(&self.furnishings),
+            );
             self.world
                 .set_model(&self.gpu.device, &self.gpu.queue, &model);
             self.world.render(

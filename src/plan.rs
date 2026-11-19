@@ -1,6 +1,9 @@
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
+use wolfcraft_assets::UvRect;
 use wolfcraft_engine::renderer::model::ModelVertex;
+
+use crate::furnishings::{FurnishingAtlas, uv_corners};
 
 pub const SHEET: Vec2 = Vec2::new(24.0, 16.0);
 
@@ -41,6 +44,8 @@ pub enum FurnitureKind {
     Bed,
     Table,
     Sofa,
+    Cabinet,
+    Lamp,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -61,16 +66,21 @@ impl OpeningKind {
 
 impl Furniture {
     pub fn size(self) -> Vec3 {
-        let size = match self.kind {
-            FurnitureKind::Bed => Vec3::new(1.6, 0.48, 2.0),
-            FurnitureKind::Table => Vec3::new(1.4, 0.75, 0.85),
-            FurnitureKind::Sofa => Vec3::new(2.1, 0.78, 0.85),
-        };
+        let size = self.kind.dimensions();
         if self.rotated {
             Vec3::new(size.z, size.y, size.x)
         } else {
             size
         }
+    }
+
+    pub fn point(self, local: Vec2) -> Vec2 {
+        let offset = if self.rotated {
+            Vec2::new(-local.y, local.x)
+        } else {
+            local
+        };
+        Vec2::from_array(self.at) + offset
     }
 
     pub fn bounds(self) -> (Vec2, Vec2) {
@@ -155,6 +165,57 @@ impl Plan {
         true
     }
 
+    pub fn l_room(&mut self, origin: Vec2) {
+        let outline = [
+            Vec2::ZERO,
+            Vec2::new(8.0, 0.0),
+            Vec2::new(8.0, 4.0),
+            Vec2::new(4.0, 4.0),
+            Vec2::new(4.0, 8.0),
+            Vec2::new(0.0, 8.0),
+        ];
+        for (index, point) in outline.into_iter().enumerate() {
+            self.wall(
+                origin + point,
+                origin + outline[(index + 1) % outline.len()],
+            );
+        }
+        for (a, b) in [
+            (Vec2::ZERO, Vec2::new(8.0, 4.0)),
+            (Vec2::new(0.0, 4.0), Vec2::new(4.0, 8.0)),
+        ] {
+            self.rooms.push(Area {
+                min: (origin + a).to_array(),
+                max: (origin + b).to_array(),
+            });
+        }
+    }
+
+    pub fn preview_bounds(&self) -> (Vec2, Vec2) {
+        let mut min = SHEET;
+        let mut max = Vec2::ZERO;
+        let mut include = |a: Vec2, b: Vec2| {
+            min = min.min(a).min(b);
+            max = max.max(a).max(b);
+        };
+        for wall in &self.walls {
+            let (a, b) = wall.points();
+            include(a, b);
+        }
+        for area in &self.rooms {
+            include(Vec2::from_array(area.min), Vec2::from_array(area.max));
+        }
+        for item in &self.furniture {
+            let (a, b) = item.bounds();
+            include(a, b);
+        }
+        if min.cmpgt(max).any() {
+            (Vec2::ZERO, SHEET)
+        } else {
+            (min, max)
+        }
+    }
+
     fn nearest_wall(&self, point: Vec2) -> Option<(usize, f32)> {
         self.walls
             .iter()
@@ -228,44 +289,53 @@ impl Plan {
     }
 }
 
-pub fn model(plan: &Plan, eye: Vec3, cutaway: bool) -> Vec<ModelVertex> {
+pub fn model(
+    plan: &Plan,
+    eye: Vec3,
+    cutaway: bool,
+    atlas: Option<&FurnishingAtlas>,
+) -> Vec<ModelVertex> {
     let mut output = Vec::new();
-    let mut prism = |center: Vec2, size: Vec3, y: f32, dir: Vec2, color: [f32; 3]| {
-        let x = Vec3::new(dir.x, 0.0, dir.y);
-        let z = x.cross(Vec3::Y);
-        let origin = Vec3::new(center.x, 40.0 + y, center.y) - eye;
-        let axes = [x, Vec3::Y, z];
-        let half = size * 0.5;
-        for (axis, u, v) in [(0, 1, 2), (1, 2, 0), (2, 0, 1)] {
-            for sign in [-1.0, 1.0] {
-                let normal = axes[axis] * sign;
-                let along = axes[u] * half[u] * sign;
-                let across = axes[v] * half[v];
-                let c = origin + normal * half[axis];
-                let corners = [
-                    c - along - across,
-                    c + along - across,
-                    c + along + across,
-                    c - along + across,
-                ];
-                for index in [0, 1, 2, 0, 2, 3] {
-                    output.push(ModelVertex {
-                        pos: corners[index].to_array(),
-                        normal: normal.to_array(),
-                        color,
-                        uv: [3.0, 2.0],
-                        tex: 0.0,
-                    });
+    let mut prism =
+        |center: Vec2, size: Vec3, y: f32, dir: Vec2, color: [f32; 3], texture: Option<UvRect>| {
+            let uv = texture.map_or([[3.0, 2.0]; 4], uv_corners);
+            let tex = if texture.is_some() { 1.0 } else { 0.0 };
+            let x = Vec3::new(dir.x, 0.0, dir.y);
+            let z = x.cross(Vec3::Y);
+            let origin = Vec3::new(center.x, 40.0 + y, center.y) - eye;
+            let axes = [x, Vec3::Y, z];
+            let half = size * 0.5;
+            for (axis, u, v) in [(0, 1, 2), (1, 2, 0), (2, 0, 1)] {
+                for sign in [-1.0, 1.0] {
+                    let normal = axes[axis] * sign;
+                    let along = axes[u] * half[u] * sign;
+                    let across = axes[v] * half[v];
+                    let c = origin + normal * half[axis];
+                    let corners = [
+                        c - along - across,
+                        c + along - across,
+                        c + along + across,
+                        c - along + across,
+                    ];
+                    for index in [0, 1, 2, 0, 2, 3] {
+                        output.push(ModelVertex {
+                            pos: corners[index].to_array(),
+                            normal: normal.to_array(),
+                            color,
+                            uv: uv[index],
+                            tex,
+                        });
+                    }
                 }
             }
-        }
-    };
+        };
     prism(
         SHEET * 0.5,
         Vec3::new(SHEET.x, 0.18, SHEET.y),
         -0.24,
         Vec2::X,
         [0.33, 0.43, 0.44],
+        None,
     );
     for (index, area) in plan.rooms.iter().enumerate() {
         let a = Vec2::from_array(area.min);
@@ -277,6 +347,7 @@ pub fn model(plan: &Plan, eye: Vec3, cutaway: bool) -> Vec<ModelVertex> {
             -0.07 + index as f32 * 0.00001,
             Vec2::X,
             [0.81, 0.68, 0.51],
+            None,
         );
     }
     for wall in &plan.walls {
@@ -291,6 +362,7 @@ pub fn model(plan: &Plan, eye: Vec3, cutaway: bool) -> Vec<ModelVertex> {
                     (bottom + top) * 0.5,
                     dir,
                     [0.89, 0.88, 0.8],
+                    None,
                 );
             }
         };
@@ -311,19 +383,17 @@ pub fn model(plan: &Plan, eye: Vec3, cutaway: bool) -> Vec<ModelVertex> {
         section(cursor, a.distance(b), 0.0, height);
     }
     for item in &plan.furniture {
-        let size = item.size();
-        let color = match item.kind {
-            FurnitureKind::Bed => [0.39, 0.62, 0.70],
-            FurnitureKind::Table => [0.62, 0.40, 0.25],
-            FurnitureKind::Sofa => [0.61, 0.42, 0.50],
-        };
-        prism(
-            Vec2::from_array(item.at),
-            size,
-            size.y * 0.5 + 0.01,
-            Vec2::X,
-            color,
-        );
+        let axis = if item.rotated { Vec2::Y } else { Vec2::X };
+        for part in item.kind.parts() {
+            prism(
+                item.point(part.position.xz()),
+                part.size,
+                part.position.y + 0.01,
+                axis,
+                [0.65; 3],
+                atlas.map(|atlas| atlas.material(part.material)),
+            );
+        }
     }
     output
 }
@@ -347,11 +417,59 @@ mod tests {
     }
 
     #[test]
+    fn l_preset_leaves_the_inner_corner_open() {
+        let mut plan = Plan::default();
+        plan.l_room(Vec2::new(2.0, 2.0));
+        assert!(plan.valid());
+        assert_eq!(plan.walls.len(), 6);
+        let area = plan
+            .rooms
+            .iter()
+            .map(|room| {
+                let size = Vec2::from_array(room.max) - Vec2::from_array(room.min);
+                size.x * size.y
+            })
+            .sum::<f32>();
+        assert_eq!(area, 48.0);
+        assert!(
+            plan.rooms
+                .iter()
+                .all(|room| room.max[0] <= 6.0 || room.max[1] <= 6.0)
+        );
+    }
+
+    #[test]
+    fn atlas_materials_are_used_only_by_placed_furnishings() {
+        let atlas = FurnishingAtlas::build().unwrap();
+        let atlas = FurnishingAtlas::upload(&egui::Context::default(), &atlas);
+        let mut plan = Plan::default();
+        assert!(
+            model(&plan, Vec3::ZERO, false, Some(&atlas))
+                .iter()
+                .all(|v| v.tex == 0.0)
+        );
+        let furniture = Furniture {
+            at: [10.0, 8.0],
+            kind: FurnitureKind::Table,
+            rotated: true,
+        };
+        let (min, max) = furniture.bounds();
+        plan.furniture.push(furniture);
+        let vertices = model(&plan, Vec3::ZERO, false, Some(&atlas));
+        let textured: Vec<_> = vertices.iter().filter(|v| v.tex == 1.0).collect();
+        assert_eq!(textured.len(), FurnitureKind::Table.parts().len() * 36);
+        assert!(textured.iter().all(|vertex| {
+            let pos = Vec3::from_array(vertex.pos).xz();
+            pos.cmpge(min - Vec2::splat(0.001)).all() && pos.cmple(max + Vec2::splat(0.001)).all()
+        }));
+    }
+
+    #[test]
     fn preview_keeps_a_door_clear_below_its_lintel() {
         let mut plan = Plan::default();
         assert!(plan.wall(Vec2::new(2.0, 2.0), Vec2::new(8.0, 2.0)));
         assert!(plan.opening(OpeningKind::Door, Vec2::new(4.0, 2.0)));
-        let vertices = model(&plan, Vec3::ZERO, false);
+        let vertices = model(&plan, Vec3::ZERO, false, None);
         assert_eq!(vertices.len(), 4 * 36); // Ground, wall on both sides, and lintel.
         for triangle in vertices.chunks_exact(3).skip(12) {
             let [a, b, c] = triangle else { unreachable!() };
