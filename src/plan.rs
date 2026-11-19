@@ -27,6 +27,35 @@ pub struct Wall {
 pub struct Area {
     pub min: [f32; 2],
     pub max: [f32; 2],
+    #[serde(default)]
+    pub finish: FloorFinish,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum FloorFinish {
+    #[default]
+    Sand,
+    Walnut,
+    Stone,
+    Sage,
+}
+
+impl FloorFinish {
+    pub const ALL: [(Self, &'static str); 4] = [
+        (Self::Sand, "Песочный"),
+        (Self::Walnut, "Орех"),
+        (Self::Stone, "Серый камень"),
+        (Self::Sage, "Шалфей"),
+    ];
+
+    pub fn color(self) -> [f32; 3] {
+        match self {
+            Self::Sand => [0.81, 0.68, 0.51],
+            Self::Walnut => [0.56, 0.35, 0.25],
+            Self::Stone => [0.63, 0.67, 0.71],
+            Self::Sage => [0.56, 0.68, 0.52],
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -51,7 +80,7 @@ pub enum FurnitureKind {
     Lamp,
 }
 
-#[derive(Clone, Copy, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Furniture {
     pub at: [f32; 2],
     pub kind: FurnitureKind,
@@ -180,6 +209,7 @@ impl Plan {
         self.rooms.push(Area {
             min: min.to_array(),
             max: max.to_array(),
+            finish: FloorFinish::default(),
         });
         true
     }
@@ -206,6 +236,7 @@ impl Plan {
             self.rooms.push(Area {
                 min: (origin + a).to_array(),
                 max: (origin + b).to_array(),
+                finish: FloorFinish::default(),
             });
         }
     }
@@ -321,11 +352,22 @@ impl Plan {
         true
     }
 
-    pub fn erase(&mut self, point: Vec2) -> bool {
-        if let Some(index) = self.furniture.iter().rposition(|item| {
+    pub fn furniture_at(&self, point: Vec2) -> Option<usize> {
+        self.furniture.iter().rposition(|item| {
             let (a, b) = item.bounds();
             point.cmpge(a).all() && point.cmple(b).all()
-        }) {
+        })
+    }
+
+    pub fn room_at(&self, point: Vec2) -> Option<usize> {
+        self.rooms.iter().rposition(|area| {
+            point.cmpge(Vec2::from_array(area.min)).all()
+                && point.cmple(Vec2::from_array(area.max)).all()
+        })
+    }
+
+    pub fn erase(&mut self, point: Vec2) -> bool {
+        if let Some(index) = self.furniture_at(point) {
             self.furniture.remove(index);
         } else if let Some((index, at)) = self.nearest_wall(point, 0.4) {
             let wall = &mut self.walls[index];
@@ -338,10 +380,7 @@ impl Plan {
             } else {
                 self.walls.remove(index);
             }
-        } else if let Some(index) = self.rooms.iter().rposition(|area| {
-            point.cmpge(Vec2::from_array(area.min)).all()
-                && point.cmple(Vec2::from_array(area.max)).all()
-        }) {
+        } else if let Some(index) = self.room_at(point) {
             self.rooms.remove(index);
         } else {
             return false;
@@ -437,7 +476,7 @@ pub fn model(
             Vec3::new(size.x, 0.14, size.y),
             -0.07 + index as f32 * 0.00001,
             Vec2::X,
-            [0.81, 0.68, 0.51],
+            area.finish.color(),
             None,
         );
     }
@@ -535,6 +574,26 @@ mod tests {
         let wall: Wall =
             serde_json::from_str(r#"{"from":[2.0,2.0],"to":[8.0,2.0],"openings":[]}"#).unwrap();
         assert_eq!(wall.thickness, 0.18);
+    }
+
+    #[test]
+    fn floor_finish_keeps_legacy_projects_and_reaches_3d() {
+        let area: Area = serde_json::from_str(r#"{"min":[2.0,2.0],"max":[6.0,5.0]}"#).unwrap();
+        assert_eq!(area.finish, FloorFinish::Sand);
+        let mut plan = Plan {
+            rooms: vec![area],
+            ..Default::default()
+        };
+        plan.rooms[0].finish = FloorFinish::Sage;
+        let saved = serde_json::to_string(&plan).unwrap();
+        let loaded: Plan = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded.rooms[0].finish, FloorFinish::Sage);
+        let mesh = model(&loaded, Vec3::ZERO, false, None);
+        assert!(
+            mesh[36..]
+                .iter()
+                .all(|vertex| vertex.color == FloorFinish::Sage.color())
+        );
     }
 
     #[test]

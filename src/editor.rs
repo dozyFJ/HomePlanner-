@@ -9,7 +9,7 @@ use glam::{Vec2, Vec3};
 use wolfcraft_engine::renderer::FrameParams;
 
 use crate::furnishings::FurnishingAtlas;
-use crate::plan::{Furniture, FurnitureKind, OpeningKind, Plan, SHEET};
+use crate::plan::{FloorFinish, Furniture, FurnitureKind, OpeningKind, Plan, SHEET};
 
 const PAPER: Color32 = Color32::from_rgb(246, 244, 235);
 const INK: Color32 = Color32::from_rgb(39, 54, 59);
@@ -94,6 +94,12 @@ struct WallEdit {
     thickness: f32,
 }
 
+struct FurnitureDrag {
+    index: usize,
+    offset: Vec2,
+    preview: Furniture,
+}
+
 pub struct Editor {
     pub open_updates: Option<Box<dyn Fn() -> Result<(), String>>>,
     pub plan: Plan,
@@ -105,6 +111,9 @@ pub struct Editor {
     wall_drag_end: Option<Vec2>,
     shape_at: Option<Vec2>,
     wall_edit: Option<WallEdit>,
+    room_edit: Option<usize>,
+    furniture_selection: Option<usize>,
+    furniture_drag: Option<FurnitureDrag>,
     portrait_sheet: Option<bool>,
     rotated: bool,
     undo: Vec<Plan>,
@@ -128,6 +137,9 @@ impl Default for Editor {
             wall_drag_end: None,
             shape_at: None,
             wall_edit: None,
+            room_edit: None,
+            furniture_selection: None,
+            furniture_drag: None,
             portrait_sheet: None,
             rotated: false,
             undo: vec![],
@@ -222,6 +234,108 @@ impl Editor {
         self.wall_drag_end = None;
     }
 
+    fn clear_selection(&mut self) {
+        self.wall_edit = None;
+        self.room_edit = None;
+        self.furniture_selection = None;
+        self.furniture_drag = None;
+    }
+
+    fn move_furniture(&mut self, index: usize, item: Furniture) {
+        if self
+            .plan
+            .furniture
+            .get(index)
+            .is_some_and(|previous| *previous != item)
+        {
+            let previous = self.plan.clone();
+            self.plan.furniture[index] = item;
+            self.remember(previous);
+        }
+    }
+
+    fn furniture_actions(&mut self, ui: &mut egui::Ui) {
+        let Some(index) = self.furniture_selection else {
+            return;
+        };
+        let Some(&item) = self.plan.furniture.get(index) else {
+            return;
+        };
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Повернуть 90°").clicked() {
+                let rotated = Furniture {
+                    rotated: !item.rotated,
+                    ..item
+                };
+                self.move_furniture(index, item_at(rotated, Vec2::from_array(item.at)));
+            }
+            if ui.button("Копировать").clicked() {
+                let center = Vec2::from_array(item.at);
+                let size = item.size();
+                let offsets = [Vec2::new(size.x + 0.25, 0.0), Vec2::new(0.0, size.z + 0.25)];
+                let destination = offsets
+                    .into_iter()
+                    .flat_map(|offset| [center + offset, center - offset])
+                    .map(|point| item_at(item, snap_point(point)))
+                    .find(|copy| {
+                        let (a, b) = copy.bounds();
+                        self.plan.furniture.iter().all(|existing| {
+                            let (c, d) = existing.bounds();
+                            a.cmpge(d).any() || c.cmpge(b).any()
+                        })
+                    });
+                if let Some(copy) = destination {
+                    let previous = self.plan.clone();
+                    self.furniture_selection = Some(self.plan.furniture.len());
+                    self.plan.furniture.push(copy);
+                    self.remember(previous);
+                    self.message.clear();
+                } else {
+                    self.message = "Рядом нет места для копии".into();
+                }
+            }
+            if ui.button("Удалить").clicked() {
+                let previous = self.plan.clone();
+                self.plan.furniture.remove(index);
+                self.clear_selection();
+                self.remember(previous);
+            }
+        });
+    }
+
+    fn room_editor(&mut self, ctx: &egui::Context) {
+        let Some(index) = self.room_edit else { return };
+        let Some(room) = self.plan.rooms.get(index) else {
+            return;
+        };
+        let mut open = true;
+        let mut finish = room.finish;
+        egui::Window::new("Цвет пола")
+            .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+            .resizable(false)
+            .collapsible(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.spacing_mut().interact_size.y = 34.0;
+                for (option, label) in FloorFinish::ALL {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(floor_color(option), "■");
+                        if ui.selectable_label(finish == option, label).clicked() {
+                            finish = option;
+                        }
+                    });
+                }
+            });
+        if finish != room.finish {
+            let previous = self.plan.clone();
+            self.plan.rooms[index].finish = finish;
+            self.remember(previous);
+            self.room_edit = None;
+        } else if !open {
+            self.room_edit = None;
+        }
+    }
+
     fn shape_menu(&mut self, ctx: &egui::Context) {
         let Some(point) = self.shape_at else { return };
         let mut open = true;
@@ -251,7 +365,7 @@ impl Editor {
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.cancel_mark();
             self.shape_at = None;
-            self.wall_edit = None;
+            self.clear_selection();
         }
         if ctx.input(|i| {
             i.events.iter().any(|event| {
@@ -266,6 +380,7 @@ impl Editor {
         }) {
             egui::DragAndDrop::clear_payload(ctx);
             self.cancel_mark();
+            self.furniture_drag = None;
         }
         let mobile = cfg!(target_os = "android");
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -288,7 +403,7 @@ impl Editor {
                     self.flush_tap();
                     self.cancel_mark();
                     self.shape_at = None;
-                    self.wall_edit = None;
+                    self.clear_selection();
                     self.message.clear();
                     self.preview = true;
                 }
@@ -339,7 +454,7 @@ impl Editor {
                     Tool::Door | Tool::Window | Tool::Garage => {
                         "Перетащите инструмент на стену или коснитесь стены."
                     }
-                    Tool::Edit => "Коснитесь стены, чтобы изменить длину и толщину.",
+                    Tool::Edit => "Коснитесь стены, пола или мебели. Мебель можно перетянуть.",
                     Tool::Erase => "Щёлкните по элементу, который хотите удалить.",
                     _ => "Щёлкните по листу, чтобы поставить мебель.",
                 };
@@ -352,6 +467,7 @@ impl Editor {
             egui::CentralPanel::default().show(ctx, |ui| self.sheet(ui, mobile, atlas));
             self.shape_menu(ctx);
             self.wall_editor(ctx);
+            self.room_editor(ctx);
         } else {
             egui::TopBottomPanel::bottom("camera").show(ctx, |ui| {
                 if mobile {
@@ -416,7 +532,7 @@ impl Editor {
                 if response.clicked() || response.drag_started() {
                     self.flush_tap();
                     self.cancel_mark();
-                    self.wall_edit = None;
+                    self.clear_selection();
                     self.tool = tool;
                     self.message.clear();
                 }
@@ -429,7 +545,11 @@ impl Editor {
             ui.heading("Инструменты");
             tool_buttons(ui);
         }
-        ui.checkbox(&mut self.rotated, "Повернуть мебель");
+        if self.tool == Tool::Edit && self.furniture_selection.is_some() {
+            self.furniture_actions(ui);
+        } else {
+            ui.checkbox(&mut self.rotated, "Повернуть мебель");
+        }
         ui.separator();
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -445,7 +565,7 @@ impl Editor {
                     }
                 }
                 self.cancel_mark();
-                self.wall_edit = None;
+                self.clear_selection();
                 self.message.clear();
             }
             if ui
@@ -457,12 +577,12 @@ impl Editor {
                 .clicked()
             {
                 self.cancel_mark();
-                self.wall_edit = None;
+                self.clear_selection();
                 self.load_example();
             }
             if ui.button("Формы").clicked() {
                 self.cancel_mark();
-                self.wall_edit = None;
+                self.clear_selection();
                 self.shape_at = Some(SHEET * 0.5);
             }
         });
@@ -480,7 +600,7 @@ impl Editor {
             }
             if ui.button("Открыть").clicked() {
                 self.cancel_mark();
-                self.wall_edit = None;
+                self.clear_selection();
                 self.message = self
                     .open()
                     .map(|_| "Проект открыт".into())
@@ -540,13 +660,13 @@ impl Editor {
                 .resize_wall(edit.index, edit.length, edit.thickness)
             {
                 self.remember(previous);
-                self.wall_edit = None;
+                self.clear_selection();
                 self.message.clear();
             } else {
                 self.message = "Стена выйдет за лист или перекроет проём".into();
             }
         } else if !open {
-            self.wall_edit = None;
+            self.clear_selection();
         }
     }
 
@@ -603,15 +723,18 @@ impl Editor {
                 Stroke::new(stroke, Color32::from_gray(208)),
             );
         }
-        for room in &self.plan.rooms {
+        for (index, room) in self.plan.rooms.iter().enumerate() {
             let a = Vec2::from_array(room.min);
             let b = Vec2::from_array(room.max);
             let room_rect = Rect::from_two_pos(screen(a), screen(b));
             painter.rect_filled(
                 room_rect,
                 0.0,
-                Color32::from_rgba_unmultiplied(206, 179, 121, 66),
+                floor_color(room.finish).gamma_multiply(0.43),
             );
+            if self.room_edit == Some(index) {
+                painter.rect_stroke(room_rect, 0.0, Stroke::new(2.0_f32, ACCENT));
+            }
             let size = b - a;
             if room_rect.width() > 80.0 && room_rect.height() > 46.0 {
                 painter.text(
@@ -660,7 +783,12 @@ impl Editor {
                 }
             }
         }
-        for item in &self.plan.furniture {
+        for (index, &stored) in self.plan.furniture.iter().enumerate() {
+            let drag = self
+                .furniture_drag
+                .as_ref()
+                .filter(|item| item.index == index);
+            let item = drag.map_or(stored, |drag| drag.preview);
             let dim = item.kind.dimensions();
             let (x, z) = (dim.x * 0.5, dim.z * 0.5);
             let corners = [
@@ -669,11 +797,14 @@ impl Editor {
                 Vec2::new(x, z),
                 Vec2::new(-x, z),
             ];
-            atlas.paint(
-                &painter,
-                item.kind,
-                corners.map(|corner| screen(item.point(corner))),
-            );
+            let corners = corners.map(|corner| screen(item.point(corner)));
+            atlas.paint(&painter, item.kind, corners);
+            if self.furniture_selection == Some(index) || drag.is_some() {
+                painter.add(egui::Shape::closed_line(
+                    corners.to_vec(),
+                    Stroke::new(2.0_f32, ACCENT),
+                ));
+            }
         }
         if let Some(kind) = egui::DragAndDrop::payload::<OpeningKind>(ui.ctx()) {
             let (point, released) = ui.input(|input| {
@@ -711,11 +842,38 @@ impl Editor {
             if released {
                 egui::DragAndDrop::take_payload::<OpeningKind>(ui.ctx());
             }
-        } else if self.shape_at.is_none() && self.wall_edit.is_none() {
+        } else if self.shape_at.is_none() && self.wall_edit.is_none() && self.room_edit.is_none() {
             let pointer = response.interact_pointer_pos().map(position);
             if response.double_clicked() {
                 self.cancel_mark();
                 self.shape_at = pointer.map(snap_point);
+            } else if self.tool == Tool::Edit && response.drag_started() {
+                self.delayed_tap = None;
+                let start = ui.input(|i| i.pointer.press_origin()).map(position);
+                if let Some((index, start)) =
+                    start.and_then(|p| self.plan.furniture_at(p).map(|i| (i, p)))
+                {
+                    let item = self.plan.furniture[index];
+                    let offset = Vec2::from_array(item.at) - start;
+                    let preview = item_at(item, snap_point(pointer.unwrap_or(start) + offset));
+                    self.furniture_drag = Some(FurnitureDrag {
+                        index,
+                        offset,
+                        preview,
+                    });
+                }
+            } else if self.tool == Tool::Edit && response.dragged() {
+                if let (Some(drag), Some(point)) = (&mut self.furniture_drag, pointer) {
+                    drag.preview = item_at(drag.preview, snap_point(point + drag.offset));
+                }
+            } else if self.tool == Tool::Edit && response.drag_stopped() {
+                if let Some(drag) = self.furniture_drag.take() {
+                    let item = pointer.map_or(drag.preview, |point| {
+                        item_at(drag.preview, snap_point(point + drag.offset))
+                    });
+                    self.move_furniture(drag.index, item);
+                    self.furniture_selection = Some(drag.index);
+                }
             } else if self.tool == Tool::Wall && response.drag_started() {
                 self.flush_tap();
                 if self.start.is_none() {
@@ -813,7 +971,10 @@ impl Editor {
                 .opening()
                 .is_some_and(|kind| self.plan.opening(kind, point)),
             Tool::Edit => {
-                if let Some((index, _)) = self.plan.nearest_wall(point, 0.6) {
+                self.clear_selection();
+                if let Some(index) = self.plan.furniture_at(point) {
+                    self.furniture_selection = Some(index);
+                } else if let Some((index, _)) = self.plan.nearest_wall(point, 0.6) {
                     let wall = &self.plan.walls[index];
                     let (a, b) = wall.points();
                     self.wall_edit = Some(WallEdit {
@@ -822,7 +983,7 @@ impl Editor {
                         thickness: wall.thickness,
                     });
                 } else {
-                    self.message = "Коснитесь стены".into();
+                    self.room_edit = self.plan.room_at(point);
                 }
                 return;
             }
@@ -884,6 +1045,20 @@ impl Editor {
     }
 }
 
+fn floor_color(finish: FloorFinish) -> Color32 {
+    let [r, g, b] = finish.color().map(|channel| (channel * 255.0) as u8);
+    Color32::from_rgb(r, g, b)
+}
+
+fn item_at(item: Furniture, center: Vec2) -> Furniture {
+    let size = item.size();
+    let half = Vec2::new(size.x, size.z) * 0.5;
+    Furniture {
+        at: center.clamp(half, SHEET - half).to_array(),
+        ..item
+    }
+}
+
 fn snap_point(point: Vec2) -> Vec2 {
     (point * 2.0).round() / 2.0
 }
@@ -891,6 +1066,33 @@ fn snap_point(point: Vec2) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_move_clamps_to_sheet_and_has_one_undo_step() {
+        let mut editor = Editor {
+            tool: Tool::Edit,
+            ..Default::default()
+        };
+        let item = Furniture {
+            at: [4.0, 4.0],
+            kind: FurnitureKind::Bed,
+            rotated: false,
+        };
+        editor.plan.furniture.push(item);
+        editor.apply(Vec2::new(4.0, 4.0));
+        assert_eq!(editor.furniture_selection, Some(0));
+        let moved = item_at(
+            Furniture {
+                rotated: true,
+                ..item
+            },
+            Vec2::ZERO,
+        );
+        editor.move_furniture(0, moved);
+        assert_eq!(editor.plan.furniture[0].bounds().0, Vec2::ZERO);
+        assert_eq!(editor.undo.len(), 1);
+        assert_eq!(editor.undo[0].furniture[0].at, item.at);
+    }
 
     #[test]
     fn opening_survives_touch_pointer_gone_on_drop() {
