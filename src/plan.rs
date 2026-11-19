@@ -78,6 +78,9 @@ pub enum FurnitureKind {
     Sofa,
     Cabinet,
     Lamp,
+    Stair,
+    StairL,
+    StairU,
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]

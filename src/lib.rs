@@ -2,6 +2,7 @@ mod editor;
 mod furnishings;
 mod modeling;
 mod plan;
+mod scan;
 
 use std::{sync::Arc, time::Instant};
 
@@ -125,6 +126,32 @@ struct App {
 }
 
 impl ApplicationHandler for App {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. })
+            && self.editor.photo_wait.is_some()
+            && let Some(graphics) = &self.graphics
+        {
+            graphics.gpu.window.request_redraw();
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if self
+            .editor
+            .photo_wait
+            .is_some_and(|deadline| deadline <= now)
+        {
+            self.editor.photo_wait = None;
+        }
+        let control = if self.graphics.is_some() && self.editor.photo_wait.is_some() {
+            winit::event_loop::ControlFlow::WaitUntil(now + std::time::Duration::from_millis(300))
+        } else {
+            winit::event_loop::ControlFlow::Wait
+        };
+        event_loop.set_control_flow(control);
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.graphics.is_some() {
             return;
@@ -247,16 +274,11 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     let activity = app.clone();
     let mut editor = Editor::for_android(data.join("house.json"));
     editor.open_updates = Some(Box::new(move || {
-        use jni::{JavaVM, jni_sig, jni_str, objects::JObject, refs::Global};
-        // The cloned AndroidApp keeps the Activity global reference alive during this call.
-        let vm = unsafe { JavaVM::from_raw(activity.vm_as_ptr().cast()) };
-        let raw = activity.activity_as_ptr() as jni::sys::jobject;
-        vm.attach_current_thread(|env| -> jni::errors::Result<()> {
-            let activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw)? };
-            env.call_method(activity, jni_str!("showUpdates"), jni_sig!("()V"), &[])?;
-            Ok(())
-        })
-        .map_err(|error| error.to_string())
+        call_android_activity(&activity, jni::jni_str!("showUpdates"))
+    }));
+    let activity = app.clone();
+    editor.open_photo = Some(Box::new(move || {
+        call_android_activity(&activity, jni::jni_str!("pickPlanPhoto"))
     }));
     let result = EventLoop::builder()
         .with_android_app(app)
@@ -266,4 +288,21 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     if let Err(error) = result {
         let _ = std::fs::write(log, error);
     }
+}
+
+#[cfg(target_os = "android")]
+fn call_android_activity(
+    activity: &winit::platform::android::activity::AndroidApp,
+    method: &jni::strings::JNIStr,
+) -> Result<(), String> {
+    use jni::{JavaVM, jni_sig, objects::JObject, refs::Global};
+    // AndroidApp keeps the Activity global reference alive during this call.
+    let vm = unsafe { JavaVM::from_raw(activity.vm_as_ptr().cast()) };
+    let raw = activity.activity_as_ptr() as jni::sys::jobject;
+    vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+        let java_activity = unsafe { env.as_cast_raw::<Global<JObject>>(&raw)? };
+        env.call_method(java_activity, method, jni_sig!("()V"), &[])?;
+        Ok(())
+    })
+    .map_err(|error| error.to_string())
 }

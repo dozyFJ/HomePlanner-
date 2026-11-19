@@ -74,12 +74,15 @@ pub struct Part {
 }
 
 impl FurnitureKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 8] = [
         Self::Bed,
         Self::Table,
         Self::Sofa,
         Self::Cabinet,
         Self::Lamp,
+        Self::Stair,
+        Self::StairL,
+        Self::StairU,
     ];
 
     pub fn dimensions(self) -> Vec3 {
@@ -89,6 +92,9 @@ impl FurnitureKind {
             Self::Sofa => Vec3::new(2.1, 0.83, 0.85),
             Self::Cabinet => Vec3::new(1.16, 1.85, 0.58),
             Self::Lamp => Vec3::new(0.44, 1.57, 0.44),
+            Self::Stair => Vec3::new(1.10, 2.80, 3.60),
+            Self::StairL => Vec3::new(3.20, 2.80, 3.20),
+            Self::StairU => Vec3::new(2.40, 2.80, 3.20),
         }
     }
 
@@ -155,6 +161,48 @@ impl FurnitureKind {
                 add((0., 1.30, 0.), (0.44, 0.13, 0.44), Shade);
                 add((0., 1.43, 0.), (0.37, 0.09, 0.37), Shade);
                 add((0., 1.52, 0.), (0.31, 0.05, 0.31), Linen);
+            }
+            Self::Stair => {
+                for i in 0..14 {
+                    let h = (i + 1) as f32 * 0.20;
+                    add(
+                        (0.0, 0.0, -1.80 + (i as f32 + 0.5) * (3.6 / 14.0)),
+                        (1.10, h, 3.6 / 14.0),
+                        if i % 2 == 0 { Oak } else { Walnut },
+                    );
+                }
+            }
+            Self::StairL | Self::StairU => {
+                let x = if self == Self::StairL { -1.05 } else { -0.65 };
+                for i in 0..7 {
+                    let h = (i + 1) as f32 * 0.20;
+                    add(
+                        (x, 0.0, -1.60 + (i as f32 + 0.5) * 0.30),
+                        (1.10, h, 0.30),
+                        Oak,
+                    );
+                }
+                if self == Self::StairL {
+                    add((x, 0.0, 1.05), (1.10, 1.40, 1.10), Walnut);
+                    for i in 0..7 {
+                        let h = (i + 8) as f32 * 0.20;
+                        add(
+                            (-0.50 + (i as f32 + 0.5) * 0.30, 0.0, 1.05),
+                            (0.30, h, 1.10),
+                            Oak,
+                        );
+                    }
+                } else {
+                    add((0.0, 0.0, 1.05), (2.40, 1.40, 1.10), Walnut);
+                    for i in 0..7 {
+                        let h = (i + 8) as f32 * 0.20;
+                        add(
+                            (0.65, 0.0, 0.50 - (i as f32 + 0.5) * 0.30),
+                            (1.10, h, 0.30),
+                            Oak,
+                        );
+                    }
+                }
             }
         }
         parts

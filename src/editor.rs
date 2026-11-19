@@ -11,6 +11,7 @@ use wolfcraft_engine::renderer::FrameParams;
 use crate::furnishings::FurnishingAtlas;
 use crate::modeling::Modeling;
 use crate::plan::{FloorFinish, Furniture, FurnitureKind, OpeningKind, Plan, SHEET};
+use crate::scan::Photo;
 
 const PAPER: Color32 = Color32::from_rgb(246, 244, 235);
 const INK: Color32 = Color32::from_rgb(39, 54, 59);
@@ -29,6 +30,9 @@ enum Tool {
     Sofa,
     Cabinet,
     Lamp,
+    Stair,
+    StairL,
+    StairU,
     Erase,
 }
 
@@ -46,6 +50,9 @@ impl Tool {
             Self::Sofa => "Диван",
             Self::Cabinet => "Шкаф",
             Self::Lamp => "Торшер",
+            Self::Stair => "Лестница",
+            Self::StairL => "Лестница 90°",
+            Self::StairU => "Лестница 180°",
             Self::Erase => "Ластик",
         }
     }
@@ -103,6 +110,11 @@ struct FurnitureDrag {
 
 pub struct Editor {
     pub open_updates: Option<Box<dyn Fn() -> Result<(), String>>>,
+    pub open_photo: Option<Box<dyn Fn() -> Result<(), String>>>,
+    photo_path: Option<PathBuf>,
+    photo: Option<Photo>,
+    photo_visible: bool,
+    pub photo_wait: Option<Instant>,
     pub plan: Plan,
     pub preview: bool,
     pub modeling_open: bool,
@@ -132,6 +144,11 @@ impl Default for Editor {
         Self {
             plan: Plan::default(),
             open_updates: None,
+            open_photo: None,
+            photo_path: None,
+            photo: None,
+            photo_visible: true,
+            photo_wait: None,
             preview: false,
             modeling_open: false,
             modeling: Modeling::default(),
@@ -165,6 +182,7 @@ impl Editor {
             ..Self::default()
         };
         editor.modeling.set_path(path.with_file_name("model.json"));
+        editor.photo_path = Some(path.with_file_name("plan-photo.gray"));
         if path.is_file() {
             if let Err(error) = editor.open() {
                 editor.message = error.to_string();
@@ -367,6 +385,64 @@ impl Editor {
         }
     }
 
+    fn refresh_photo(&mut self, ctx: &egui::Context) {
+        let Some(path) = &self.photo_path else { return };
+        let Ok(modified) = fs::metadata(path).and_then(|meta| meta.modified()) else {
+            return;
+        };
+        if self
+            .photo
+            .as_ref()
+            .is_some_and(|photo| photo.modified == modified)
+        {
+            return;
+        }
+        match Photo::read(path, modified, ctx) {
+            Ok(photo) => {
+                self.photo = Some(photo);
+                self.photo_visible = true;
+                self.photo_wait = None;
+            }
+            Err(error) => self.message = error.to_string(),
+        }
+    }
+
+    fn scan_tools(&mut self, ui: &mut egui::Ui) {
+        if self.open_photo.is_none() {
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Фото плана").clicked() {
+                if let Some(open) = &self.open_photo {
+                    match open() {
+                        Ok(()) => self.photo_wait = Some(Instant::now() + Duration::from_secs(120)),
+                        Err(error) => self.message = format!("Не удалось открыть фото: {error}"),
+                    }
+                }
+            }
+            if self.photo.is_some() {
+                ui.checkbox(&mut self.photo_visible, "Подложка");
+                let walls = ui.button("Распознать стены").clicked();
+                let preview = ui.button("Фото → Дом · 3D").clicked();
+                if (walls || preview)
+                    && let Some(photo) = &self.photo
+                {
+                    let previous = self.plan.clone();
+                    let count = photo.insert_walls(&mut self.plan, true);
+                    if count > 0 {
+                        self.remember(previous);
+                        self.message =
+                            format!("Добавлено стен: {count}. Проверьте размеры и линии.");
+                    } else {
+                        self.message =
+                            "Новых прямых стен не найдено. Можно обвести фото вручную.".into();
+                    }
+                    self.preview = preview && !self.plan.walls.is_empty();
+                }
+            }
+        });
+    }
+
     pub fn ui(&mut self, ctx: &egui::Context, atlas: &FurnishingAtlas) {
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.cancel_mark();
@@ -388,6 +464,7 @@ impl Editor {
             self.cancel_mark();
             self.furniture_drag = None;
         }
+        self.refresh_photo(ctx);
         let mobile = cfg!(target_os = "android");
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             if mobile {
@@ -457,6 +534,9 @@ impl Editor {
                     }
                 }
             });
+            if !self.preview && !self.modeling_open {
+                self.scan_tools(ui);
+            }
             if (self.preview || self.modeling_open) && !self.message.is_empty() {
                 ui.label(&self.message);
             }
@@ -547,6 +627,9 @@ impl Editor {
             Tool::Sofa,
             Tool::Cabinet,
             Tool::Lamp,
+            Tool::Stair,
+            Tool::StairL,
+            Tool::StairU,
             Tool::Erase,
         ];
         let mut tool_buttons = |ui: &mut egui::Ui| {
@@ -738,6 +821,22 @@ impl Editor {
             p.clamp(Vec2::ZERO, SHEET)
         };
         painter.rect_filled(rect, 0.0, PAPER);
+        if self.photo_visible
+            && let Some(photo) = &self.photo
+        {
+            let corners = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+            let mut mesh = egui::Mesh::with_texture(photo.texture.id());
+            for [u, v] in corners {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: screen(photo.mapped_point([u, v], true)),
+                    uv: egui::pos2(u, v),
+                    color: Color32::WHITE,
+                });
+            }
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(0, 2, 3);
+            painter.add(egui::Shape::mesh(mesh));
+        }
         for x in 0..=(SHEET.x * 2.0) as usize {
             let x_m = x as f32 * 0.5;
             let stroke: f32 = if x % 2 == 0 { 0.8 } else { 0.4 };
@@ -1025,6 +1124,9 @@ impl Editor {
                     Tool::Table => FurnitureKind::Table,
                     Tool::Cabinet => FurnitureKind::Cabinet,
                     Tool::Lamp => FurnitureKind::Lamp,
+                    Tool::Stair => FurnitureKind::Stair,
+                    Tool::StairL => FurnitureKind::StairL,
+                    Tool::StairU => FurnitureKind::StairU,
                     _ => FurnitureKind::Sofa,
                 };
                 let item = Furniture {
