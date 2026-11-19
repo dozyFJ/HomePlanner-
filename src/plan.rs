@@ -217,6 +217,54 @@ impl Plan {
         true
     }
 
+    pub fn split_room(&mut self, index: usize, axis: usize, at: Option<f32>) -> Option<usize> {
+        let room = *self.rooms.get(index)?;
+        let coordinate = at.unwrap_or((room.min[axis] + room.max[axis]) * 0.5);
+        let middle = (coordinate * 2.0).round() * 0.5;
+        if middle - room.min[axis] < 0.5 || room.max[axis] - middle < 0.5 {
+            return None;
+        }
+
+        let along = 1 - axis;
+        let mut start = room.min;
+        let mut end = room.max;
+        start[axis] = middle;
+        end[axis] = middle;
+        let mut spans: Vec<_> = self
+            .walls
+            .iter()
+            .filter_map(|wall| {
+                if (wall.from[axis] - middle).abs() > 0.001
+                    || (wall.to[axis] - middle).abs() > 0.001
+                {
+                    return None;
+                }
+                let lo = wall.from[along].min(wall.to[along]).max(start[along]);
+                let hi = wall.from[along].max(wall.to[along]).min(end[along]);
+                (lo < hi).then_some((lo, hi))
+            })
+            .collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        spans.push((end[along], end[along]));
+        for (lo, hi) in spans {
+            if lo > start[along] {
+                let mut gap_end = end;
+                gap_end[along] = lo;
+                self.wall(Vec2::from_array(start), Vec2::from_array(gap_end));
+            }
+            start[along] = start[along].max(hi);
+        }
+
+        let mut first = room;
+        let mut second = room;
+        first.max[axis] = middle;
+        second.min[axis] = middle;
+        self.rooms[index] = first;
+        let next = self.rooms.len();
+        self.rooms.push(second);
+        Some(next)
+    }
+
     pub fn l_room(&mut self, origin: Vec2) {
         let outline = [
             Vec2::ZERO,
@@ -535,6 +583,25 @@ pub fn model(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn split_room_preserves_the_perimeter_and_existing_partition_opening() {
+        let mut plan = Plan::default();
+        assert!(plan.room(Vec2::ZERO, Vec2::new(8.0, 6.0)));
+        plan.rooms[0].finish = FloorFinish::Sage;
+        assert!(plan.wall(Vec2::new(4.0, 0.0), Vec2::new(4.0, 4.0)));
+        assert!(plan.opening(OpeningKind::Door, Vec2::new(4.0, 2.0)));
+        assert_eq!(plan.split_room(0, 0, Some(4.1)), Some(1));
+        assert_eq!(plan.rooms[0].max, [4.0, 6.0]);
+        assert_eq!(plan.rooms[1].min, [4.0, 0.0]);
+        assert_eq!(plan.rooms[1].finish, FloorFinish::Sage);
+        assert_eq!(plan.walls.len(), 6);
+        assert_eq!(plan.walls[4].openings.len(), 1);
+        assert_eq!(
+            plan.walls[5].points(),
+            (Vec2::new(4.0, 4.0), Vec2::new(4.0, 6.0))
+        );
+    }
 
     #[test]
     fn openings_fit_the_wall_and_do_not_overlap() {

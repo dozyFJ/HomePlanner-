@@ -171,6 +171,14 @@ struct FurnitureDrag {
     preview: Furniture,
 }
 
+#[derive(Clone, Copy)]
+enum OutlineAction {
+    Move,
+    Wall,
+    EditWall,
+    Split(usize),
+}
+
 pub struct Editor {
     pub open_updates: Option<Box<dyn Fn() -> Result<(), String>>>,
     pub open_projects: Option<Box<dyn Fn() -> Result<(), String>>>,
@@ -203,6 +211,9 @@ pub struct Editor {
     sheet_multitouch: bool,
     house_selection: Option<HouseSelection>,
     house_move: Option<(Vec2, Vec2)>,
+    outline_room: Option<usize>,
+    outline_action: Option<OutlineAction>,
+    outline_anchor: Option<egui::Pos2>,
     pencil: Vec<Vec2>,
     rotated: bool,
     undo: Vec<Plan>,
@@ -249,6 +260,9 @@ impl Default for Editor {
             sheet_multitouch: false,
             house_selection: None,
             house_move: None,
+            outline_room: None,
+            outline_action: None,
+            outline_anchor: None,
             pencil: Vec::new(),
             rotated: false,
             undo: vec![],
@@ -349,6 +363,14 @@ impl Editor {
             ui.spacing_mut().interact_size.y = 38.0;
             ui.menu_button("...", |ui| {
                 if ui
+                    .selectable_label(self.tool == Tool::House, "Контур дома")
+                    .clicked()
+                {
+                    self.reset_edit_state();
+                    self.tool = Tool::House;
+                    ui.close_menu();
+                }
+                if ui
                     .add_enabled(self.can_undo(), egui::Button::new("Отменить всё"))
                     .clicked()
                 {
@@ -423,6 +445,9 @@ impl Editor {
         self.furniture_drag = None;
         self.house_selection = None;
         self.house_move = None;
+        self.outline_room = None;
+        self.outline_action = None;
+        self.outline_anchor = None;
     }
 
     fn move_furniture(&mut self, index: usize, item: Furniture) {
@@ -520,6 +545,197 @@ impl Editor {
         }
     }
 
+    fn outline_bounds(&self) -> Option<(Vec2, Vec2)> {
+        let room = self.plan.rooms.get(self.outline_room?)?;
+        Some((Vec2::from_array(room.min), Vec2::from_array(room.max)))
+    }
+
+    fn outline_tap(&mut self, point: Vec2) {
+        if !point.cmpge(Vec2::ZERO).all() || !point.cmple(SHEET).all() {
+            return;
+        }
+        match self.outline_action {
+            Some(OutlineAction::Wall) => {
+                let point = snap_point(point);
+                if let Some(start) = self.start.take() {
+                    let previous = self.plan.clone();
+                    if self.plan.wall(start, point) {
+                        self.remember(previous);
+                    }
+                } else {
+                    self.start = Some(point);
+                }
+            }
+            Some(OutlineAction::Split(axis)) => {
+                if let Some((a, b)) = self.outline_bounds()
+                    && point.cmpge(a).all()
+                    && point.cmple(b).all()
+                    && let Some(index) = self.outline_room
+                {
+                    self.split_outline(index, axis, Some(point[axis]));
+                }
+            }
+            Some(OutlineAction::EditWall) => {
+                if let Some((index, _)) = self.plan.nearest_wall(point, 0.6) {
+                    self.outline_action = None;
+                    self.edit_wall(index);
+                }
+            }
+            Some(OutlineAction::Move) => {
+                if let Some((a, b)) = self.outline_bounds()
+                    && let Some(house) = &mut self.house_selection
+                {
+                    let delta = house.clamp_delta(snap_point(point - (a + b) * 0.5));
+                    if delta != Vec2::ZERO {
+                        let previous = self.plan.clone();
+                        house.translate(&mut self.plan, delta);
+                        self.remember(previous);
+                    }
+                }
+                self.outline_action = None;
+            }
+            None => {
+                self.outline_room = self.plan.room_at(point);
+                self.house_selection = HouseSelection::at(&self.plan, point);
+                if self.outline_room.is_none()
+                    && let Some((index, _)) = self.plan.nearest_wall(point, 0.45)
+                {
+                    self.edit_wall(index);
+                }
+            }
+        }
+    }
+
+    fn edit_wall(&mut self, index: usize) {
+        let wall = &self.plan.walls[index];
+        let (a, b) = wall.points();
+        self.wall_edit = Some(WallEdit {
+            index,
+            length: a.distance(b),
+            thickness: wall.thickness,
+        });
+    }
+
+    fn split_outline(&mut self, index: usize, axis: usize, at: Option<f32>) {
+        let previous = self.plan.clone();
+        if self.plan.split_room(index, axis, at).is_some() {
+            self.remember(previous);
+            self.shape_at = None;
+            self.tool = Tool::House;
+            self.outline_room = Some(index);
+            self.outline_action = None;
+            if let Some((a, b)) = self.outline_bounds() {
+                self.house_selection = HouseSelection::at(&self.plan, (a + b) * 0.5);
+            }
+            self.message.clear();
+        } else {
+            self.message = "Оставьте хотя бы 0,5 м с каждой стороны".into();
+        }
+    }
+
+    fn outline_options(&mut self, ui: &mut egui::Ui, index: usize) {
+        ui.menu_button("Разделить на комнаты", |ui| {
+            for (axis, direction) in [(0, "Вдоль Y"), (1, "Вдоль X")] {
+                ui.horizontal(|ui| {
+                    ui.label(direction);
+                    if ui.button("Пополам").clicked() {
+                        self.split_outline(index, axis, None);
+                        ui.close_menu();
+                    }
+                    if ui.button("По точке").clicked() {
+                        self.shape_at = None;
+                        self.tool = Tool::House;
+                        self.outline_room = Some(index);
+                        self.outline_action = Some(OutlineAction::Split(axis));
+                        self.message.clear();
+                        ui.close_menu();
+                    }
+                });
+            }
+        });
+        for (action, label) in [
+            (OutlineAction::Move, "Перенести коробку"),
+            (OutlineAction::Wall, "Свободная стена"),
+        ] {
+            if ui.button(label).clicked() {
+                self.shape_at = None;
+                self.start = None;
+                self.tool = Tool::House;
+                self.outline_room = Some(index);
+                if let Some((a, b)) = self.outline_bounds() {
+                    self.house_selection = HouseSelection::at(&self.plan, (a + b) * 0.5);
+                }
+                self.outline_action = Some(action);
+                self.message.clear();
+            }
+        }
+        if ui.button("Править стену").clicked() {
+            self.shape_at = None;
+            self.tool = Tool::House;
+            self.outline_room = Some(index);
+            self.outline_action = Some(OutlineAction::EditWall);
+        }
+        if ui.button("Цвет пола").clicked() {
+            self.shape_at = None;
+            self.room_edit = Some(index);
+        }
+        if !self.message.is_empty() {
+            ui.label(&self.message);
+        }
+    }
+
+    fn outline_menu(&mut self, ctx: &egui::Context) {
+        if self.shape_at.is_some() || self.wall_edit.is_some() || self.room_edit.is_some() {
+            return;
+        }
+        let anchor = self
+            .outline_anchor
+            .unwrap_or_else(|| ctx.screen_rect().center());
+        let Some(index) = self.outline_room else {
+            return;
+        };
+        let viewport = ctx.screen_rect();
+        let right = (viewport.right() - 240.0).max(viewport.left() + 8.0);
+        let below = (viewport.bottom() - 310.0).max(viewport.top() + 8.0);
+        let position = egui::pos2(
+            anchor.x.clamp(viewport.left() + 8.0, right),
+            anchor.y.clamp(viewport.top() + 8.0, below),
+        );
+        let mut open = true;
+        egui::Window::new("Контур комнаты")
+            .current_pos(position)
+            .movable(false)
+            .resizable(false)
+            .collapsible(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_max_width(215.0);
+                ui.spacing_mut().interact_size.y = 30.0;
+                match self.outline_action {
+                    None => self.outline_options(ui, index),
+                    Some(action) => {
+                        ui.label(match action {
+                            OutlineAction::Move => "Коснитесь нового центра",
+                            OutlineAction::EditWall => "Коснитесь стены",
+                            OutlineAction::Split(_) => "Укажите точку перегородки",
+                            OutlineAction::Wall if self.start.is_none() => "Укажите начало стены",
+                            OutlineAction::Wall => "Укажите конец стены",
+                        });
+                        if !self.message.is_empty() {
+                            ui.label(&self.message);
+                        }
+                        if ui.button("Готово").clicked() {
+                            self.start = None;
+                            self.outline_action = None;
+                        }
+                    }
+                }
+            });
+        if !open {
+            self.reset_edit_state();
+        }
+    }
+
     fn shape_menu(&mut self, ctx: &egui::Context) {
         let Some(point) = self.shape_at else { return };
         let mut open = true;
@@ -530,6 +746,10 @@ impl Editor {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.spacing_mut().interact_size.y = 36.0;
+                if let Some(index) = self.plan.room_at(point) {
+                    self.outline_options(ui, index);
+                    ui.separator();
+                }
                 for (shape, label) in HouseShape::ALL {
                     if ui.button(label).clicked() {
                         let previous = self.plan.clone();
@@ -754,7 +974,20 @@ impl Editor {
             });
         if self.modeling_open {
             self.modeling.sync_house(&self.plan);
-            self.modeling.ui(ctx, mobile);
+            let outline = self.outline_bounds();
+            if let Some((point, screen)) = self.modeling.ui(ctx, mobile, outline, self.start) {
+                if self.room_edit.is_none() && self.wall_edit.is_none() {
+                    if self.outline_action.is_none() {
+                        self.outline_anchor = Some(screen + vec2(14.0, 14.0));
+                    }
+                    self.outline_tap(point);
+                }
+            }
+            if self.modeling.editing_plan() {
+                self.outline_menu(ctx);
+                self.wall_editor(ctx);
+                self.room_editor(ctx);
+            }
             return;
         }
         if !self.preview {
@@ -780,6 +1013,7 @@ impl Editor {
             }
             egui::CentralPanel::default().show(ctx, |ui| self.sheet(ui, mobile, atlas));
             self.shape_menu(ctx);
+            self.outline_menu(ctx);
             self.wall_editor(ctx);
             self.room_editor(ctx);
         } else {
@@ -1226,7 +1460,7 @@ impl Editor {
                 0.0,
                 floor_color(room.finish).gamma_multiply(0.43),
             );
-            if self.room_edit == Some(index) {
+            if self.room_edit == Some(index) || self.outline_room == Some(index) {
                 painter.rect_stroke(room_rect, 0.0, Stroke::new(2.0_f32, ACCENT));
             }
             let size = b - a;
@@ -1370,12 +1604,21 @@ impl Editor {
                 .is_some_and(|point| rect.contains(point));
             if self.tool == Tool::House {
                 if response.clicked() {
-                    self.house_selection = if on_sheet {
-                        pointer.and_then(|point| HouseSelection::at(&self.plan, point))
-                    } else {
-                        None
-                    };
-                } else if response.drag_started() {
+                    if on_sheet {
+                        if let Some(point) = pointer {
+                            let opening_selection = self.outline_action.is_none();
+                            self.outline_tap(point);
+                            if opening_selection {
+                                self.outline_anchor = self.outline_bounds().map(|(a, b)| {
+                                    Rect::from_two_pos(screen(a), screen(b)).right_bottom()
+                                        + vec2(6.0, 6.0)
+                                });
+                            }
+                        }
+                    } else if self.outline_action.is_none() {
+                        self.clear_selection();
+                    }
+                } else if response.drag_started() && self.outline_action.is_none() {
                     let start = ui
                         .input(|i| i.pointer.press_origin())
                         .filter(|point| rect.contains(*point))
@@ -1383,6 +1626,7 @@ impl Editor {
                     if let Some(start) = start {
                         self.house_selection = HouseSelection::at(&self.plan, start);
                         if let (Some(house), Some(end)) = (&self.house_selection, pointer) {
+                            self.outline_room = self.plan.room_at(start);
                             self.house_move =
                                 Some((start, house.clamp_delta(snap_point(end - start))));
                         }
@@ -1591,13 +1835,7 @@ impl Editor {
                 if let Some(index) = self.plan.furniture_at(point) {
                     self.furniture_selection = Some(index);
                 } else if let Some((index, _)) = self.plan.nearest_wall(point, 0.6) {
-                    let wall = &self.plan.walls[index];
-                    let (a, b) = wall.points();
-                    self.wall_edit = Some(WallEdit {
-                        index,
-                        length: a.distance(b),
-                        thickness: wall.thickness,
-                    });
+                    self.edit_wall(index);
                 } else {
                     self.room_edit = self.plan.room_at(point);
                 }
@@ -1882,6 +2120,23 @@ mod tests {
         );
         assert!(editor.sheet_zoom > 1.0);
         assert!(editor.plan.walls.is_empty());
+    }
+
+    #[test]
+    fn scene_plan_edits_are_available_on_the_sheet_and_undoable() {
+        let mut editor = Editor::default();
+        assert!(editor.plan.room(Vec2::new(4.0, 4.0), Vec2::new(12.0, 12.0)));
+        editor.select_destination(Destination::Scene);
+        editor.outline_tap(Vec2::new(6.0, 6.0));
+        assert_eq!(editor.outline_room, Some(0));
+        editor.outline_action = Some(OutlineAction::Wall);
+        editor.outline_tap(Vec2::new(8.0, 4.0));
+        editor.outline_tap(Vec2::new(8.0, 12.0));
+        editor.select_destination(Destination::Sheet);
+        assert_eq!(editor.plan.walls.len(), 5);
+        assert!(editor.outline_room.is_none());
+        editor.undo_plan(false);
+        assert_eq!(editor.plan.walls.len(), 4);
     }
 
     #[test]

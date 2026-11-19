@@ -94,6 +94,7 @@ enum Mode {
     Orbit,
     Pan,
     Move,
+    Plan,
 }
 
 struct Drag {
@@ -271,7 +272,18 @@ impl Modeling {
         self.distance = (self.distance * factor).clamp(0.8, 90.0);
     }
 
-    pub fn ui(&mut self, ctx: &egui::Context, mobile: bool) {
+    pub fn editing_plan(&self) -> bool {
+        self.mode == Mode::Plan
+    }
+
+    pub fn ui(
+        &mut self,
+        ctx: &egui::Context,
+        mobile: bool,
+        outline: Option<(Vec2, Vec2)>,
+        start: Option<Vec2>,
+    ) -> Option<(Vec2, Pos2)> {
+        let mut plan_tap = None;
         let cancelled = ctx.input(|input| {
             input.key_pressed(egui::Key::Escape)
                 || input.events.iter().any(|event| {
@@ -298,10 +310,15 @@ impl Modeling {
                         (Mode::Orbit, "Орбита"),
                         (Mode::Pan, "Сдвиг"),
                         (Mode::Move, "Двигать куб"),
+                        (Mode::Plan, "Править план"),
                     ] {
                         if ui.selectable_label(self.mode == mode, label).clicked() {
                             self.mode = mode;
                             self.drag = None;
+                            if mode == Mode::Plan {
+                                self.set_view(View::Top);
+                                self.focus_house();
+                            }
                         }
                     }
                     if ui.button("−").clicked() {
@@ -320,6 +337,9 @@ impl Modeling {
                     ] {
                         if ui.selectable_label(self.view == view, label).clicked() {
                             self.set_view(view);
+                            if view != View::Top && self.editing_plan() {
+                                self.mode = Mode::Orbit;
+                            }
                         }
                     }
                     if ui.button("В кадр").clicked() {
@@ -419,7 +439,14 @@ impl Modeling {
                 let ray_at = |point| screen_ray(&camera, screen, point);
                 let pointer = response.interact_pointer_pos();
                 if !cancelled && response.clicked() {
-                    self.selected = pointer.and_then(|point| self.pick(ray_at(point)));
+                    if self.editing_plan() {
+                        plan_tap = pointer.and_then(|point| {
+                            let hit = plane_hit(ray_at(point), Vec3::Y * GROUND, Vec3::Y)?;
+                            Some((Vec2::new(hit.x, hit.z), point))
+                        });
+                    } else {
+                        self.selected = pointer.and_then(|point| self.pick(ray_at(point)));
+                    }
                 }
                 let pinch = ctx.input(|input| input.multi_touch());
                 if response.hovered() || response.dragged() {
@@ -478,8 +505,8 @@ impl Modeling {
                         }
                     } else if response.dragged() {
                         let delta = response.drag_delta();
-                        let pan =
-                            self.mode == Mode::Pan || ctx.input(|input| input.modifiers.shift);
+                        let pan = matches!(self.mode, Mode::Pan | Mode::Plan)
+                            || ctx.input(|input| input.modifiers.shift);
                         if pan {
                             let right = camera.forward.cross(camera.up).normalize();
                             let unit = self.distance * 0.0015;
@@ -491,8 +518,33 @@ impl Modeling {
                         }
                     }
                 }
+                if self.editing_plan() {
+                    let project = |p: Vec2| {
+                        let v = Vec3::new(p.x, GROUND, p.y) - camera.eye.as_vec3();
+                        let t = (camera.fov_y * 0.5).tan() * v.dot(camera.forward);
+                        let right = camera.forward.cross(camera.up).normalize();
+                        screen.center()
+                            + vec2(
+                                screen.width() * 0.5 * v.dot(right) / (t * camera.aspect),
+                                -screen.height() * 0.5 * v.dot(camera.up) / t,
+                            )
+                    };
+                    let painter = ui.painter_at(rect);
+                    let stroke = Stroke::new(2.0_f32, crate::theme::ACCENT);
+                    if let Some((a, b)) = outline {
+                        painter.rect_stroke(
+                            Rect::from_two_pos(project(a), project(b)),
+                            0.0,
+                            stroke,
+                        );
+                    }
+                    if let Some(start) = start {
+                        painter.circle_filled(project(start), 4.0, crate::theme::ACCENT);
+                    }
+                }
                 axes(ui.painter(), rect, &camera);
             });
+        plan_tap
     }
 
     fn pick(&self, (origin, ray): (Vec3, Vec3)) -> Option<usize> {
@@ -696,6 +748,42 @@ fn axes(painter: &egui::Painter, rect: Rect, camera: &FrameParams) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn top_view_tap_projects_onto_the_shared_plan() {
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0));
+        let center = screen.center();
+        let mut plan = Plan::default();
+        assert!(plan.room(Vec2::new(4.0, 4.0), Vec2::new(12.0, 12.0)));
+        let mut scene = Modeling::default();
+        scene.sync_house(&plan);
+        scene.mode = Mode::Plan;
+        scene.set_view(View::Top);
+        let mut selected = None;
+        let mut frame = |events| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| selected = scene.ui(ctx, false, None, None),
+            );
+        };
+        let button = |pressed| egui::Event::PointerButton {
+            pos: center,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![]);
+        frame(vec![egui::Event::PointerMoved(center), button(true)]);
+        frame(vec![button(false)]);
+        let (point, _) = selected.expect("tap in 3D plan mode");
+        assert!((point - Vec2::splat(8.0)).length() < 0.001);
+        assert_eq!(plan.room_at(point), Some(0));
+    }
 
     #[test]
     fn scene_frames_the_current_house_and_uses_its_live_geometry() {
