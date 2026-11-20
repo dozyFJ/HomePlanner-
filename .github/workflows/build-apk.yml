@@ -98,6 +98,18 @@ jobs:
           name: HomePlanner-0.1.12
           path: ${{ steps.apk.outputs.path }}
 
+      - name: Publish APK as GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="build-${{ github.run_number }}"
+          cp "${{ steps.apk.outputs.path }}" "HomePlanner-0.1.12.apk"
+          gh release create "$TAG" "HomePlanner-0.1.12.apk" \
+            --target "${{ github.sha }}" \
+            --title "HomePlanner 0.1.12 (build ${{ github.run_number }})" \
+            --notes "Сборка из ${{ github.ref_name }} @ ${{ github.sha }}" \
+            --prerelease
+
       - name: Publish to OTA branch
         if: steps.keystore.outputs.has_keystore == 'true'
         env:
