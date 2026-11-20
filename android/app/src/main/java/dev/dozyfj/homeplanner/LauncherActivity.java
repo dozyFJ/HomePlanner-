@@ -559,6 +559,10 @@ public final class LauncherActivity extends Activity {
         return Math.round(pixels * getResources().getDisplayMetrics().density);
     }
 
+    private float dp(float pixels) {
+        return pixels * getResources().getDisplayMetrics().density;
+    }
+
     private void updateAction() {
         if (downloaded != null && downloaded.isFile()) {
             install();
